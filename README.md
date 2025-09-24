@@ -1,1 +1,0 @@
-# GUV_Protein_Localization
