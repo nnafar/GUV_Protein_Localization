@@ -4,77 +4,51 @@ Created on Tue Nov 15 15:33:44 2022
 
 @author: kkourkoulou
 
-
 Script to calculate the radial and angular intensity profiles of GUVs 
 encapsulating septin and/or actin and to quantify the corresponding protein
 localization on the vesicle membrane. 
  
 main.py     :    main file to run the script
 skeleton.py :    file with all necessary functions in main.py
-
 """
 
 import os
-
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap 
-
 import pandas as pd                                                             
 import csv                         
-
 from skimage.filters import try_all_threshold                                  
 from skimage.filters import threshold_li, threshold_otsu, threshold_yen, \
                             threshold_isodata, threshold_mean, threshold_minimum, threshold_triangle
-                                  
 from scipy import ndimage as nd                                                
-from scipy.signal import find_peaks, peak_widths                              
+from scipy.signal import find_peaks, peak_widths                             
 
 
-
-def find_projects_info(path_to_script):
+def find_projects_info(path_membrane):
     """
-    Finds the experiment and image information of all the data sets to be analyzed,
-    stored in the "data" folder. The membrane channel tif file's name is used as 
-    reference as it is present in all sets. 
-    Note: File names should be of the format: 
-          "experiment_date-experiment_name-image_name-channel", where "channel" 
-          should be: 
-          "C1" for the membrane channel, 
-          "C2", if a single protein is present, for that protein's channel,
-          "C2" for the septin channel, if both proteins are present
-          "C3" for the actin channel, if both proteins are present.
-         
-    Input
-    -----
-    path_to_script : str
-        The path to the script. Within the same folder subfolder "data" should
-        exist and contain all the files to be analyzed. 
-    
-    Returns
-    -------
-    exp_info_all_sets : np.ndarray
-        All the information of the images analyzed. Information of different sets
-        are stored vertically, while horizontally:
-        exp_info_all_sets[:,0] is the experiment date
-        exp_info_all_sets[:,1] is the experiment name
-        exp_info_all_sets[:,2] is the name of the image to be analyzed
-        exp_info_all_sets[:,3] is the full representative name by combining the previous information.
-        
+    Finds the experiment information of all the data sets to be analyzed
+    by scanning the specific Membrane (C1) directory.
     """
-    os.chdir(path_to_script + "\\data")
-    
     set_of_data  = 0
     exp_info_all_sets = np.zeros((4), dtype = str)
     
-    for f in os.listdir():
+    for f in os.listdir(path_membrane):
         
         if f.endswith("C1.tif"):
             
             name, extension = os.path.splitext(f)
-            exp_info_single_set = name.split("-")
-            exp_info_single_set.pop(-1)
-            exp_info_single_set.append(exp_info_single_set[0] + "-" + exp_info_single_set[1] + "-" + exp_info_single_set[2])
+            # Split filename: "20251110_BranchedCortex-Region0000-C1"
+            parts = name.split("-")
+            
+            # Remove "C1" -> ["20251110_BranchedCortex", "Region0000"]
+            parts.pop(-1)
+            
+            # Recombine -> "20251110_BranchedCortex-Region0000"
+            full_name = "-".join(parts)
+            
+            # Construct info array: [Date/Name, Region, FullName, FullName]
+            exp_info_single_set = [parts[0], parts[1], full_name, full_name]
             
             if set_of_data == 0:
                 exp_info_all_sets = np.array(exp_info_single_set)
@@ -83,119 +57,59 @@ def find_projects_info(path_to_script):
             
             set_of_data += 1
     
-    
-    os.chdir(path_to_script)
-    
     return exp_info_all_sets
 
 
-def read_files(path_to_script, exp_info, proteins_present):
+def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present):
     """
-    Function that reads the image files and the vesicle detection by DisGUVery.
-    
-    Input
-    -----
-    path_to_script : str
-        The path to the folder containing the data to be analyzed.
-        
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-        
-    proteins_present : np.ndarray
-        Array of booleans indicating presence (True) or abscence (False) of: 
-        proteins_present[0]: Septin 
-        proteins_present[1]: Actin 
-    
-    Returns
-    -------
-    channels_data : np.ndarray
-        The channels of the image to be analyzed.
-        channels_data[:,:,0] always corresponds to the Membrane channel
-        If only one protein is present:
-        channels_data[:,:,1] corresponds to that protein's channel
-        If two proteins are present:
-        channels_data[:,:,1] corresponds to the Septin channel    
-        channels_data[:,:,2] corresponds to the Actin channel  
-    
-    coordinates : np.ndarray
-        The vesicles' information from the DisGUVery output.
-        coordinates[:,0]: vesicle ids of all vesicles
-        coordinates[:,1]: xc (px) of all vesicles
-        coordinates[:,2]: yc (px) of all vesicles
-        coordinates[:,3]: radi (px) of all vesicles
-        
+    Function that reads the image files and the vesicle detection from separate folders.
     """
-    os.chdir(path_to_script + "\\data")
+    file_stem = exp_info[3]
     
-    channels_data = plt.imread(exp_info[3] + "-C1.tif")
+    # 1. Read Membrane (C1) - Always present
+    c1_path = os.path.join(path_membrane, file_stem + "-C1.tif")
+    channels_data = plt.imread(c1_path)
     
+    # 2. Read Septin (C2) - If present
     if proteins_present[0] == True:
-        channels_data = np.dstack((channels_data, plt.imread(exp_info[3] + "-C2.tif")))
+        c2_path = os.path.join(path_septin, file_stem + "-C2.tif")
+        if os.path.exists(c2_path):
+            channels_data = np.dstack((channels_data, plt.imread(c2_path)))
+        else:
+            print(f"Warning: Septin file not found at {c2_path}")
         
+    # 3. Read Actin (C3) - If present
     if proteins_present[1] == True: 
-        channels_data = np.dstack((channels_data, plt.imread(exp_info[3] + "-C3.tif")))
+        c3_path = os.path.join(path_actin, file_stem + "-C3.tif")
+        if os.path.exists(c3_path):
+            channels_data = np.dstack((channels_data, plt.imread(c3_path)))
+        else:
+            print(f"Warning: Actin file not found at {c3_path}")
     
-    # Read the CSV file - but don't worry about column names yet
-    csv_file_path = exp_info[3] + "-detected_vesicles.csv"
-    detected_vesicles = pd.read_csv(csv_file_path)
+    # 4. Read Detected Vesicles CSV
+    csv_path = os.path.join(path_detected, file_stem + "-detected_vesicles.csv")
+    detected_vesicles = pd.read_csv(csv_path)
     
     # Print data for debugging
-    print("CSV columns:", detected_vesicles.columns.tolist())
-    print("First few rows:")
-    print(detected_vesicles.head())
+    print(f"Processing: {file_stem}")
     
     # Create coordinates array 
     coordinates = np.zeros((len(detected_vesicles), 4))
     
-    # IMPORTANT: Explicitly assign values based on column position, not names
-    # We know the correct order should be: ID, xc, yc, radius
-    
-    # For vesicle ID, we'll just create sequential numbers starting from 1
+    # ID, xc, yc, radius
     coordinates[:, 0] = np.arange(1, len(detected_vesicles) + 1)
-    
-    # For x, y, radius - we'll use column positions from the CSV
-    # Assuming standard DisGUVery format: x is column 1, y is column 2, size/radius is column 3
     coordinates[:, 1] = detected_vesicles.iloc[:, 0].values  # X coordinate
     coordinates[:, 2] = detected_vesicles.iloc[:, 1].values  # Y coordinate  
     coordinates[:, 3] = detected_vesicles.iloc[:, 2].values  # Radius/size
     
-    # Print coordinate ranges for verification
-    print(f"X coordinate range: {coordinates[:,1].min()} to {coordinates[:,1].max()}")
-    print(f"Y coordinate range: {coordinates[:,2].min()} to {coordinates[:,2].max()}")
-    print(f"Radius range: {coordinates[:,3].min()} to {coordinates[:,3].max()}")
-    
-    os.chdir(path_to_script)
-    
     return channels_data, coordinates
+
 
 def create_output(path_to_output, exp_info, proteins_present):
     """
-    Creates an empty output directory and an output file. If it already existed,
-    it is overwritten.
-    
-    Input
-    -----
-    path_to_output : str
-        The path to the folder to output folder.
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
-    proteins_present : np.ndarray
-        Array of booleans indicating presence (True) or abscence (False) of: 
-        proteins_present[0]: Septin 
-        proteins_present[1]: Actin
-        
+    Creates an empty output directory and an output file.
     """
-    os.makedirs(path_to_output, exist_ok= True)
+    os.makedirs(os.path.dirname(path_to_output), exist_ok= True)
         
     protein_status = plot_format(proteins_present)
     
@@ -208,86 +122,43 @@ def create_output(path_to_output, exp_info, proteins_present):
     if protein_status == "only_actin":
         column_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius", "M Background", "A Background", "A localization", "Comment"]
 
-        
-    with open(path_to_output+"\\" + exp_info[3] + "-Output.csv", "w", newline='') as output_file:
+    with open(path_to_output + "-Output.csv", "w", newline='') as output_file:
         df = csv.DictWriter(output_file, delimiter=',', fieldnames = column_headers)
         df.writeheader()
         
     
 def color_maps():
     """
-    Creates and registers in matplotlib the colormaps that will be used for the
-    different channels. If the colormaps are already register the process is skipped.  
-    
-    Conventions of LUTs:
-    --------------------
-    Membrane channel:  Cyan
-    Septin channel  :  Magenta
-    Actin channel   :  Yellow
-    
+    Creates and registers in matplotlib the colormaps.
     """
     if "cmap_cyan" not in plt.colormaps():
         colors = ["black", "cyan"]
         nodes = [0.0, 1.0]
         cmap_cyan = LinearSegmentedColormap.from_list("cmap_cyan", list(zip(nodes, colors)))
-        plt.colormaps.register(cmap=cmap_cyan)  # Updated method
-        print("Colormap 'cmap_cyan' has been registered in matplotlib.")
+        plt.colormaps.register(cmap=cmap_cyan) 
         
     if "cmap_magenta" not in plt.colormaps():
         colors = ["black","magenta"]
         nodes = [0.0, 1.0]
         cmap_magenta = LinearSegmentedColormap.from_list("cmap_magenta", list(zip(nodes, colors)))
-        plt.colormaps.register(cmap=cmap_magenta)  # Updated method
-        print("Colormap 'cmap_magenta' has been registered in matplotlib.")
+        plt.colormaps.register(cmap=cmap_magenta) 
     
     if "cmap_magenta_enhanced" not in plt.colormaps():
         colors = ["black","magenta", "magenta"]
         nodes = [0.0, 0.2, 1.0]
         cmap_magenta_enhanced = LinearSegmentedColormap.from_list("cmap_magenta_enhanced", list(zip(nodes, colors)))
-        plt.colormaps.register(cmap=cmap_magenta_enhanced)  # Updated method
-        print("Colormap 'cmap_magenta_enhanced' has been registered in matplotlib.")
+        plt.colormaps.register(cmap=cmap_magenta_enhanced) 
         
     if "cmap_yellow" not in plt.colormaps():
         colors = ["black","yellow"]
         nodes = [0.0, 1.0]
         cmap_yellow = LinearSegmentedColormap.from_list("cmap_yellow", list(zip(nodes, colors)))
-        plt.colormaps.register(cmap=cmap_yellow)  # Updated method
-        print("Colormap 'cmap_yellow' has been registered in matplotlib.")
+        plt.colormaps.register(cmap=cmap_yellow)
 
     
 def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, path_to_output, exp_info):
     """
-    Displays the image to be analyzed with the centers of the vesicles, detected
-    with DisGUVery, annotated.  
-    
-    Input
-    -----
-    to_plot : bool
-        If True, the image and the centers are plotted and displayed.
-        If False, the function has no output.
-        
-    num_vesicles : int
-        The total number of detected vesicles.
-    
-    ch_membrane : np.ndarray
-        The membrane channel.
-    
-    all_xc : np.ndarray
-        The array containing the x coordinates of all the detected vesicles.
-        
-    all_yc : np.ndarray
-        The array containing the y coordinates of all the detected vesicles.
-    
-    path_to_output : str
-        The path to the folder to output folder.
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
+    Displays the image to be analyzed with the centers of the vesicles.
     """
     if to_plot == True:
         plt.figure(dpi=125)
@@ -298,56 +169,27 @@ def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, path_to
         for i in range(num_vesicles):
             plt.annotate(i+1, (all_xc[i]+5, all_yc[i]-5), c = 'red') 
         
-    
-        plt.savefig(path_to_output+"\\" + exp_info[3] + "-Detected_centres.png")
-
+        plt.savefig(path_to_output + "-Detected_centres.png")
 
 
 def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     """
-    Creates a square croped view of a chosen vesicle. In case the vesicle is 
-    close to the border the produced image is recentered so that the original
-    image borders are not crossed. 
-    
-    Input
-    -----
-    channel : np.ndarray
-        The image data corresponding to the channel we want to crop.
-        
-    size_side : float
-        The length (unit of measure: each vesicles' radius) of the side of the 
-        square zoomed-in image we want to create. 
-        
-    image_dim : np.ndarray
-        The original image's dimensions. 
-        image_dim[0] corresponds to the x direction.
-        image_dim[1] corresponds to the y direction.
-        
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-        
-    Returns
-    -------
-    vesicle_box_channel : np.ndarray
-        The 2-D array with the data of the cropped image.
-
+    Creates a square cropped view of a chosen vesicle. 
+    Robustly handles cases where the crop box is larger than the image dimensions.
     """
     xc               = ves_coordinates[1]
     yc               = ves_coordinates[2]
     radius           = ves_coordinates[3]
     
     vesicle_box_side = int(size_side * radius)
+    expected_size    = 2 * vesicle_box_side
     
     move_right = 0
     move_left  = 0
     move_up    = 0
     move_down  = 0
 
+    # Calculate shifts to keep the window within image bounds if possible
     if xc - vesicle_box_side < 0: 
         move_right = vesicle_box_side - xc
                   
@@ -359,50 +201,35 @@ def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
                       
     if yc + vesicle_box_side > image_dim[1]: 
         move_up    = vesicle_box_side - (image_dim[1]-yc)   
-         
-    vesicle_box_channel = channel[int(yc - vesicle_box_side + move_down - move_up):int(yc + vesicle_box_side + move_down - move_up), int(xc - vesicle_box_side + move_right - move_left):int(xc + vesicle_box_side - move_left + move_right)]
     
+    # Define slice indices
+    y_start = int(yc - vesicle_box_side + move_down - move_up)
+    y_end   = int(yc + vesicle_box_side + move_down - move_up)
+    x_start = int(xc - vesicle_box_side + move_right - move_left)
+    x_end   = int(xc + vesicle_box_side - move_left + move_right)
+    
+    # Perform the slice
+    # Note: Python slices automatically clip to valid ranges (e.g. 0 to 2048)
+    vesicle_box_channel = channel[max(0, y_start):max(0, y_end), max(0, x_start):max(0, x_end)]
+    
+    # Check if the resulting slice matches the expected size
+    if vesicle_box_channel.shape != (expected_size, expected_size):
+        # Create a full-size black canvas
+        padded_box = np.zeros((expected_size, expected_size), dtype=channel.dtype)
+        
+        # Paste the valid image data into the canvas
+        # We align it based on the effective valid data size we retrieved
+        h, w = vesicle_box_channel.shape
+        padded_box[:h, :w] = vesicle_box_channel
+        
+        return padded_box
     
     return vesicle_box_channel
 
 
 def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates):    
     """
-    Allows for optional manual choice of the threshold method used for the 
-    background noise calculation. If no manual choice is desired, the Li method
-    is chosen by default.  
-
-    Input
-    -----
-    user_choice : bool
-        If True: manual choice is required.
-        If False: automatic choice takes place.
-        
-    channel : np.ndarray
-        The image data corresponding to the channel we want to crop. 
-        
-    size_side : float
-        The length (unit of measure: each vesicles' radius) of the side of the 
-        square zoomed-in image we want to create. 
-        
-    image_dim : np.ndarray
-        The original image's dimensions. 
-        image_dim[0] corresponds to the x direction.
-        image_dim[1] corresponds to the y direction.
-        
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-
-    Returns
-    -------
-    threshold : float
-        The threshold value to be used during background calculation. 
-
+    Allows for optional manual choice of the threshold method.
     """
     vesicle_box_channel = zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates)
     
@@ -415,28 +242,20 @@ def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates
         
         if threshold_method == 'Isodata':
             threshold = threshold_isodata(vesicle_box_channel)
-            
         elif threshold_method == 'Li':
             threshold = threshold_li(vesicle_box_channel)
-            
         elif threshold_method == 'Mean':
             threshold = threshold_mean(vesicle_box_channel)
-            
         elif threshold_method == 'Minimum':
             threshold = threshold_minimum(vesicle_box_channel)
-            
         elif threshold_method == 'Otsu':
             threshold = threshold_otsu(vesicle_box_channel)
-            
         elif threshold_method == 'Triangle':
             threshold = threshold_triangle(vesicle_box_channel)
-            
         elif threshold_method == 'Yen':
             threshold = threshold_yen(vesicle_box_channel)
-            
         else:
             print('Invalid method!')
-        
     else:
         threshold = threshold_li(vesicle_box_channel)
         
@@ -446,64 +265,6 @@ def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates
 def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profiles):
     """
     Calculation of the multiple linear profiles for a single vesicle.
-
-    Input
-    -----
-    channels_data : np.ndarray
-        The channels of the image to be analyzed.
-        channels_data[:,:,0] always corresponds to the Membrane channel
-        If only one protein is present:
-        channels_data[:,:,1] corresponds to that protein's channel
-        If two proteins are present:
-        channels_data[:,:,1] corresponds to the Septin channel    
-        channels_data[:,:,2] corresponds to the Actin channel 
-        
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-        
-    image_dim : np.ndarray
-        The original image's dimensions. 
-        image_dim[0] corresponds to the x direction.
-        image_dim[1] corresponds to the y direction.
-        
-    parameters_profiles : np.ndarray
-        The 3 important parameters for the linear profile calculation:
-        parameters_profiles[0] : number of linear profiles to consider for a 
-                                 single vesicle
-        parameters_profiles[1] : length of the linear profiles 
-                                 (unit of measure: vesicle radius)
-        parameters_profiles[2] : the step (in px) for sampling along the vesicle
-                                 radius
-        
-    Returns
-    -------
-    intensity_profiles : np.ndarray
-        The intensity linear profiles calculated.
-        Note: Data related to different channels are stored along the 3rd 
-              dimension of the array. Element [:,:,0] is always based on the 
-              membrane channel, element [:,:,1] is based on the single protein
-              present. If both proteins are present, element [:,:,1] corresponds
-              to the septin channel and element [:,:,2] corresponds to the actin
-              channel.
-        
-    along_radius : np.ndarray
-        The points along the linear profiles, starting from the center of the
-        vesicle. 
-    
-    theta : np.ndarray
-        The angles considered for the linear profiles.
-        
-    death_mark : bool
-        If True, the vesicle's requested intensity profile is extending outside
-        of the image borders and the vesicle is marked to be disregarded. 
-        If False, the vesicle's position doesn't raise an issue and the analysis
-        can be continued.
-
     """
     num_channels   = len(channels_data[0,0,:])
     
@@ -515,7 +276,6 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
     length_excess  = parameters_profiles[1]
     dr             = parameters_profiles[2]
     
-   
     profile_radius_limit = length_excess * radius
     
     theta        = np.linspace(0, 2*np.pi, num_angles, endpoint=False)         
@@ -529,9 +289,6 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
         death_mark = True
         return intensity_profiles, along_radius, theta, death_mark
           
-    
-    ## Defining the image indices corresponding to the pixels along the linear profiles:
-        
     line_x       = np.full((profile_radius, num_angles), int(xc)) + np.rint(np.matmul(np.transpose(np.asmatrix(along_radius)),np.asmatrix(np.cos(theta))))
     line_y       = np.full((profile_radius, num_angles), int(yc)) + np.rint(np.matmul(np.transpose(np.asmatrix(along_radius)),np.asmatrix(np.sin(theta))))
     
@@ -546,21 +303,7 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
 
 def fill_in_mask(mask_memb):
     """
-    Assistive function that fills in the space inside the vesicle contours of the 
-    membrane mask. 
-    Additionally fills in partially visible vesicles that are cut at the image
-    borders. 
-    
-    Input
-    -----
-    mask_memb : np.ndarray
-        The membrane mask created using a thresholding method.
-    
-    Returns
-    -------
-    mask_memb_fill : np.ndarray
-        The filled in mask to be used for the background noise calculation. 
-
+    Assistive function that fills in the space inside the vesicle contours.
     """
     mask_memb_fill = nd.binary_fill_holes(mask_memb).astype(int)
     
@@ -605,75 +348,7 @@ def fill_in_mask(mask_memb):
 
 def background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, ves_coordinates, threshold, path_to_output, exp_info):
     """
-    Calculation of the background noise, focusing in the region of the vesicle
-    of interest. 
-    Optionally, the calculated mask is diplayed for visual inspection, next to
-    the original images. A choice of proper image format based on the number of 
-    proteins present is incorporated. 
-
-    Input
-    -----
-    plot_mask: bool
-        If True, the calculated masks are also plotted for visual inspection.
-        If False, no plotting takes place.
-    
-    channels_data : np.ndarray
-        The channels of the image to be analyzed.
-        channels_data[:,:,0] always corresponds to the Membrane channel
-        If only one protein is present:
-        channels_data[:,:,1] corresponds to that protein's channel
-        If two proteins are present:
-        channels_data[:,:,1] corresponds to the Septin channel    
-        channels_data[:,:,2] corresponds to the Actin channel 
-    
-    proteins_present : np.ndarray
-        Array of booleans indicating presence (True) or abscence (False) of: 
-        proteins_present[0]: Septin 
-        proteins_present[1]: Actin 
-    
-    size_mask : float
-        The length (unit of measure: each vesicles' radius) of the side of the 
-        square zoomed-in image of the vesicle of interest we want to consider 
-        for the background calculation.  
-        
-    image_dim : np.ndarray
-        The original image's dimensions. 
-        image_dim[0] corresponds to the x direction.
-        image_dim[1] corresponds to the y direction.
-        
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-        
-    threshold : float
-        The threshold value to be used for the creation of the mask. 
-    
-    path_to_output : str
-        The path to the output folder. 
-        
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-        
-    Returns
-    -------
-    background: float
-        The background noise intensity estimated. Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] always corresponds to the background of the membrane channel.
-        If only one protein is present:
-        background[:,1] corresponds to the background of that protein's channel.
-        If two proteins are present:
-        background[:,1] corresponds to the background of the septin channel.    
-        background[:,2] corresponds to the background of the actin channel.
-    
+    Calculation of the background noise.
     """
     num_channels     = len(channels_data[0,0,:])
     size_box = int(size_mask * ves_coordinates[3])
@@ -711,22 +386,8 @@ def background_noise(plot_mask, channels_data, proteins_present, size_mask, imag
 def plot_format(proteins_present):
     """
     Pre-processing for choosing a plotting format appropriate for the number of
-    channels present in the analyzed image. 
-    
-    Input
-    -----
-    proteins_present : np.ndarray
-        Array of booleans indicating presence (True) or abscence (False) of: 
-        proteins_present[0]: Septin 
-        proteins_present[1]: Actin 
-        
-    Returns
-    -------
-    protein_status: str
-        A string indicating how many and which protein are present.
-        Three options possible: only_septin, only_actin, both_proteins. 
+    channels present.
     """
-    
     if proteins_present[0] == True:
         if proteins_present[1] == True:
             protein_status = "both_proteins"
@@ -741,41 +402,7 @@ def plot_format(proteins_present):
             
 def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
     """
-    Displays the background noise calculated and the produced mask for visual 
-    inspection, next to the original images.
-    Format is appropiate only when both proteins are present.  
-    
-    Input
-    -----
-    vesicle_id : int
-        The vesicle's identity number.
-    
-    vesicle_box : np.ndarray
-        The square cropped view of a chosen vesicle. 
-        vesicle_box[:,:,0] corresponds to the membrane channel.
-        vesicle_box[:,:,1] corresponds to the septin channel.
-        vesicle_box[:,:,2] corresponds to the actin channel.
-    
-    mask_memb_fill : np.ndarray
-        The filled in mask to be used for the background noise calculation.
-    
-    background: float
-        The background noise intensity estimated. Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] always corresponds to the background of the membrane channel.
-        background[:,1] corresponds to the background of the septin channel.    
-        background[:,2] corresponds to the background of the actin channel.
-    
-    path_to_output : str
-        The path to the output folder. 
-        
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-        
+    Displays the background noise calculated and the produced mask.
     """
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1,4,figsize=(13,4), dpi=125)
     fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', S:' +  str(round(background[0,1],3)) + ', A:' +  str(round(background[0,2],3)))
@@ -793,45 +420,12 @@ def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_
     ax4.set_axis_off()
     plt.show()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
 
     
 def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
    """
-   Displays the background noise calculated and the produced mask for visual 
-   inspection, next to the original images.
-   Format is appropiate when only septin is present. 
-   
-   Input
-   -----
-   vesicle_id : int
-       The vesicle's identity number.
-   
-   vesicle_box : np.ndarray
-       The square cropped view of a chosen vesicle. 
-       vesicle_box[:,:,0] corresponds to the membrane channel.
-       vesicle_box[:,:,1] corresponds to the septin channel.
-       vesicle_box[:,:,2] corresponds to the actin channel.
-   
-   mask_memb_fill : np.ndarray
-       The filled in mask to be used for the background noise calculation.
-   
-   background: float
-       The background noise intensity estimated. Data related to different 
-       channels are stored along the 3rd dimension of the array:
-       background[:,0] always corresponds to the background of the membrane channel.
-       background[:,1] corresponds to the background of the septin channel.    
-    
-   path_to_output : str
-       The path to the output folder. 
-        
-   exp_info : list
-       Contains information of the file's name in order:
-       exp_info[0]: the experiment date
-       exp_info[1]: the experiment name
-       exp_info[2]: the name of the image to be analyzed
-       exp_info[3]: full representative name by combining the previous information
-        
+   Displays the background noise calculated and the produced mask (Septin only).
    """
    fig, (ax1, ax2, ax3) = plt.subplots(1,3,figsize=(13,5), dpi=125)
    fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', S:' +  str(round(background[0,1],3)))
@@ -846,46 +440,14 @@ def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, pat
    ax3.set_axis_off()
    plt.show()
 
-   fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+   # Corrected: Removed doubled path injection
+   fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
 
 
 def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
    """
-   Displays the background noise calculated and the produced mask for visual 
-   inspection, next to the original images.
-   Format is appropiate when only actin is present. 
-   
-   Input
-   -----
-   vesicle_id : int
-       The vesicle's identity number.
-   
-   vesicle_box : np.ndarray
-       The square cropped view of a chosen vesicle. 
-       vesicle_box[:,:,0] corresponds to the membrane channel.
-       vesicle_box[:,:,1] corresponds to the septin channel.
-       vesicle_box[:,:,2] corresponds to the actin channel.
-   
-   mask_memb_fill : np.ndarray
-       The filled in mask to be used for the background noise calculation.
-   
-   background: float
-       The background noise intensity estimated. Data related to different 
-       channels are stored along the 3rd dimension of the array:
-       background[:,0] always corresponds to the background of the membrane channel.
-       background[:,1] corresponds to the background of the actin channel.    
-    
-   path_to_output : str
-       The path to the output folder. 
-     
-   exp_info : list
-       Contains information of the file's name in order:
-       exp_info[0]: the experiment date
-       exp_info[1]: the experiment name
-       exp_info[2]: the name of the image to be analyzed
-       exp_info[3]: full representative name by combining the previous information     
-   
-    """
+   Displays the background noise calculated and the produced mask (Actin only).
+   """
    fig, (ax1, ax2, ax3) = plt.subplots(1,3,figsize=(13,5), dpi=125)
    fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', A:' +  str(round(background[0,1],3))) 
    ax1.imshow(vesicle_box[:,:,0], cmap = "cmap_cyan")
@@ -899,44 +461,13 @@ def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, pa
    ax3.set_axis_off()
    plt.show()
   
-   fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+   # Corrected: Removed doubled path injection
+   fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
 
 
 def background_correction(num_channels, intensity_profiles, background):
     """ 
     Background correction of the intesity linear profiles. 
-    
-    Input
-    -----
-    num_channels : int
-        The number of channels present in the image analyzed.
-        
-    intensity_profiles : np.ndarray
-        The intensity linear profiles calculated.
-        Note: Data related to different channels are stored along the 3rd 
-              dimension of the array. Element [:,:,0] is always based on the 
-              membrane channel, element [:,:,1] is based on the single protein
-              present. If both proteins are present, element [:,:,1] corresponds
-              to the septin channel and element [:,:,2] corresponds to the actin
-              channel.
-              
-    background : np.ndarray
-        The background noise estimated for the different channels
-        Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] always corresponds to the background of the membrane channel.
-        If only one protein is present:
-        background[:,1] corresponds to the background of that protein's channel.
-        If two proteins are present:
-        background[:,1] corresponds to the background of the septin channel.    
-        background[:,2] corresponds to the background of the actin channel.
-    
-    Returns
-    -------
-    intensity_profiles_corrected : np.ndarray
-        The intensity linear profiles after the background noise correction.
-        Note: Data is stored as in the intensity_profiles array. 
-              
     """
     intensity_profiles_corrected = np.ones_like(intensity_profiles)
     
@@ -948,29 +479,7 @@ def background_correction(num_channels, intensity_profiles, background):
 
 def radial_profile(num_channels, intensity_profiles):
     """
-    Calculation of a collective radial profile for a given vesicle from multiple 
-    equally-distances linear profiles along the vesicles radius. 
-    
-    Input
-    -----
-    num_channels : int
-        The number of channels present in the image analyzed. 
-        
-    intensity_profiles : np.ndarray
-        The intensity linear profiles calculated. Backgrounds corrections should
-        take place beforehand. 
-        Note: Data related to different channels are stored along the 3rd 
-              dimension of the array. Element [:,:,0] is always based on the 
-              membrane channel, element [:,:,1] is based on the single protein
-              present. If both proteins are present, element [:,:,1] corresponds
-              to the septin channel and element [:,:,2] corresponds to the actin
-              channel.
-    
-    Returns
-    -------
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-    
+    Calculation of a collective radial profile.
     """
     radial_profiles  = np.ones_like(intensity_profiles[:,0,:])
     
@@ -983,30 +492,6 @@ def radial_profile(num_channels, intensity_profiles):
 def membrane_detection(radial_profile_memb, radius):
     """
     Detection of the membrane inner and outer borders.
-    Convention used: width at half maximum
-    
-    Input
-    -----
-    radial_profile_memb : np.ndarray
-        The 1D array of the membrane radial intensity profile. 
-    
-    radius: float
-        The radius of the vesicle detected by DisGUVery. 
-        
-    Returns
-    -------
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    comment : list
-        List of strings that correspond to comments on issues encountered.
-        
-    death_mark : bool
-        If True, no peak was detected and the vesicle is marked to be disregarded. 
-        If False, peak/s was/were detected and the analysis can continued.
     """
     comment = []
     death_mark = False
@@ -1091,22 +576,6 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
     """
     Check if the membrane is uniform enough for reliable analysis.
     Flags problematic vesicles for manual review but doesn't reject them.
-    
-    Input
-    -----
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study.
-        
-    radius : float
-        The radius of the vesicle under study.
-    
-    Returns
-    -------
-    comments : list
-        List of quality flags for manual review
     """
     comments = []
     
@@ -1207,112 +676,20 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
 
 def angular_profile(num_channels, intensity_profiles, index_border_in, index_border_out, pixels_to_remove):
     """
-    Calculation of the angular profile along the membrane contour for a given 
-    vesicle.
-    Current convention: Averaging over the detected membrane area for each angle
-                        considered during the calcualtion of the linear profiles. 
-                        
-    Input
-    -----
-    num_channels : int
-        The number of channels present in the image analyzed.
-
-    intensity_profiles : np.ndarray
-        The intensity linear profiles calculated. Backgrounds corrections should
-        take place beforehand. 
-        Note: Data related to different channels are stored along the 3rd 
-              dimension of the array. Element [:,:,0] is always based on the 
-              membrane channel, element [:,:,1] is based on the single protein
-              present. If both proteins are present, element [:,:,1] corresponds
-              to the septin channel and element [:,:,2] corresponds to the actin
-              channel.
-              
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    pixels_to_remove : int
-        The number of pixels at the center to be removed to avoid the inherent 
-        pixel multicounting.
-        
-    Returns
-    -------
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        The profiles corresponding to the different channels are stored along 
-        the 3rd dimension. 
-        angular_profiles[:,0] corresponds to the membrane channel.
-        If only one protein is present:
-        angular_profiles[:,1] corresponds to that protein channel. 
-        If both proteins are peresent:
-        angular_profiles[:,1] corresponds to the septin channel. 
-        angular_profiles[:,2] corresponds to the actin channel.
-    
+    Calculation of the angular profile along the membrane contour.
     """
-    # intensity_profiles = intensity_profiles[:, pixels_to_remove:, :]
     angular_profiles = np.ones_like(intensity_profiles[0,:,:])
     
     for i in range(num_channels):
         angular_profiles[:,i] = np.average(intensity_profiles[pixels_to_remove+index_border_in:pixels_to_remove+index_border_out,:,i], axis=0)
     
-    # print("angular_profiles", np.average(angular_profiles[:,1]))
     return angular_profiles
 
 
 def localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, radius, size_central_area, pixels_to_remove):
     """
     Quantification of the protein localization on the membrane.
-    Convention used: Difference between the median signal within the detected
-                     membrane width the average signal at a central area of the
-                     vesicle, normalized by the median signal within the detected
-                     membrane width. Negative values are clipped to 0.
-
-   Recommended values for classification:    0  < L < 1/6  : No localization
-                                            1/6 < L <= 1   : Localization              
-    
-    Input
-    -----
-    num_channels : int
-        The number of channels present in the image analyzed.
-    
-    angular_profiles : np.ndarray
-        The collective angular intensity profile along the detected membrane of
-        the vesicle under study. 
-        
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-        
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    radius : float
-        The radius of the vesicle under study.
-        
-    size_central_area : float
-        The central area radius (unit of measure: each vesicles' radius) to be 
-        considered.
-    pixels_to_remove : int
-        The number of pixels at the center to be removed to avoid the inherent 
-        pixel multicounting.
-    
-    Returns
-    -------
-    localization : np.ndarray
-        The quantified localization of the protein(s) at the membrane.
-        If only one protein is present, then localization has a single element
-        corresponding to that protein. 
-        If both proteins are present, localization[0] corresponds to the septin
-        channel and localization[1] corresponds to the actin channel. 
-        
-    comment : list
-        List of strings that correspond to comments on issues encountered/
-    
-   """
+    """
     comment = []
     
     num_proteins   = num_channels - 1 
@@ -1345,106 +722,7 @@ def localization(num_channels, angular_profiles, radial_profiles, index_border_i
 
 def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, path_to_output, exp_info):
     """
-    Optional plotting of the calculated intensity radial and angular profiles 
-    next to the vesicle channels for easier visual inspection.
-    A choice of proper image format based on the number of proteins present is 
-    incorporated. 
-    
-    Input
-    -----
-    plot_intensity_profiles : bool
-        If True, the intesnity profiles are displayed. 
-        If False, the function is skipped.
-    
-    proteins_present : np.ndarray
-        Array of booleans indicating presence (True) or abscence (False) of: 
-        proteins_present[0]: Septin 
-        proteins_present[1]: Actin  
-    
-    parameters_sizes : np.ndarray
-        The parameters related to the size of cropped mages used in the code and 
-        the conention for the border fo the central vesicle area considered. 
-        parameters_sizes[0] relates to the size of the considered mask calculation.
-        parameters_sizes[1] relates to the size of the image used for visual inspection.
-        parameters_sizes[2] relates to the size of the considered central vesicle area. 
-
-    channels_data : np.ndarray
-        The channels of the image to be analyzed.
-        channels_data[:,:,0] always corresponds to the Membrane channel
-        If only one protein is present:
-        channels_data[:,:,1] corresponds to that protein's channel
-        If two proteins are present:
-        channels_data[:,:,1] corresponds to the Septin channel    
-        channels_data[:,:,2] corresponds to the Actin channel 
-    
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-    
-    image_dim : np.ndarray
-        The original image's dimensions. 
-        image_dim[0] corresponds to the x direction.
-        image_dim[1] corresponds to the y direction.
-    
-    along_radius : np.ndarray
-        The points along the linear profiles, starting from the center of the
-        vesicle. 
-    
-    theta : np.ndarray
-        The angles considered for the linear profiles.
-    
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-    
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        The profiles corresponding to the different channels are stored along 
-        the 3rd dimension. 
-        angular_profiles[:,0] corresponds to the membrane channel.
-        If only one protein is present:
-        angular_profiles[:,1] corresponds to that protein channel. 
-        If both proteins are peresent:
-        angular_profiles[:,1] corresponds to the septin channel. 
-        angular_profiles[:,2] corresponds to the actin channel.
-    
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    background : np.ndarray
-        The background noise estimated for the different channels
-        Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] always corresponds to the background of the membrane channel.
-        If only one protein is present:
-        background[:,1] corresponds to the background of that protein's channel.
-        If two proteins are present:
-        background[:,1] corresponds to the background of the septin channel.    
-        background[:,2] corresponds to the background of the actin channel.
-    
-    localization : np.ndarray
-        The quantified localization of the protein(s) at the membrane.
-        If only one protein is present, then localization has a single element
-        corresponding to that protein. 
-        If both proteins are present, localization[0] corresponds to the septin
-        channel and localization[1] corresponds to the actin channel. 
-    
-    path_to_output : str
-        The path to the output folder. 
-        
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-        
+    Optional plotting of the calculated intensity radial and angular profiles.
     """
     if plot_intensity_profiles == True:
         
@@ -1470,73 +748,7 @@ def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameter
 
 def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
     """
-    Plotting of the intensity radial and angular profiles. 
-    Appropriate format only when both proteins are present.
-    
-    Input
-    -----
-    vesicle_id : int
-        The vesicle's identity number.
-        
-    radius : float
-        The vesicle's radius detected by DisGUVery.   
-        
-    size_central_area : float
-        The central area radius (unit of measure: each vesicles' radius) considered during localization quantification
-    
-    along_radius : np.ndarray
-        The points along the linear profiles, starting from the center of the
-        vesicle. 
-    
-    theta : np.ndarray
-        The angles considered for the linear profiles.
-    
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-    
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        The profiles corresponding to the different channels are stored along 
-        the 3rd dimension. 
-        angular_profiles[:,0] corresponds to the membrane channel.
-        angular_profiles[:,1] corresponds to the septin channel. 
-        angular_profiles[:,2] corresponds to the actin channel.
-    
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    image_box : np.ndarray
-        The cropped image of the vesicle to be displayed. 
-        image_box[:,:,0] corresponds to the membrane channel.
-        image_box[:,:,1] corresponds to the septin channel. 
-        image_box[:,:,2] corresponds to the septin channel. 
-        
-    background : np.ndarray
-        The background noise estimated for the different channels
-        Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] corresponds to the background of the membrane channel.
-        background[:,1] corresponds to the background of the septin channel.    
-        background[:,2] corresponds to the background of the actin channel.
-    
-    localization : np.ndarray
-        The quantified localization of the proteins at the membrane.
-        localization[0] corresponds to the septin channel.
-        localization[1] corresponds to the actin channel. 
-    
-    path_to_output: str
-        The path to the output folder.
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
+    Plotting of the intensity radial and angular profiles (Both proteins).
     """
     
     ## Intensity radial profile:
@@ -1568,7 +780,7 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["E"].text(-0.2,-0.2,"Localization A :  " + str(round(localization[1],3)), size = 10)
     axes["E"].set_axis_off()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
     
     ## Intensity angular profile:
 
@@ -1589,74 +801,12 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow")
     axes["D"].set_axis_off()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
 
     
 def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
     """
-    Plotting of the intensity radial and angular profiles. 
-    Appropriate format when only septin is present.
-    
-    Input
-    -----
-    vesicle_id : int
-        The vesicle's identity number.
-        
-    radius : float
-        The vesicle's radius detected by DisGUVery.   
-    
-    size_central_area : float
-        The central area radius (unit of measure: each vesicles' radius) considered during localization quantification
-    
-    along_radius : np.ndarray
-        The points along the linear profiles, starting from the center of the
-        vesicle. 
-    
-    theta : np.ndarray
-        The angles considered for the linear profiles.
-    
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-    
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        The profiles corresponding to the different channels are stored along 
-        the 3rd dimension. 
-        angular_profiles[:,0] corresponds to the membrane channel.
-        angular_profiles[:,1] corresponds to the septin channel. 
-    
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    image_box : np.ndarray
-        The cropped image of the vesicle to be displayed. 
-        image_box[:,:,0] corresponds to the membrane channel.
-        image_box[:,:,1] corresponds to the septin channel. 
-        
-    background : np.ndarray
-        The background noise estimated for the different channels
-        Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] corresponds to the background of the membrane channel.
-        background[:,1] corresponds to the background of the septin channel.    
-    
-    localization : np.ndarray
-        The quantified localization of the protein at the membrane.
-        localization[0] corresponds to the septin channel.
-    
-    path_to_output: str
-        The path to the output folder.
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
+    Plotting of the intensity radial and angular profiles (Septin only).
     """
     ## Intensity radial profile:
         
@@ -1664,24 +814,16 @@ def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radiu
     axes["A"].set_title('Intensity radial profile of Vesicle ' + str(vesicle_id))
     axes["A"].plot(along_radius[2:], radial_profiles[2:,0]/np.max(radial_profiles[2:,0]), c = 'cyan', label = 'Membrane channel')
     axes["A"].plot(along_radius[2:], radial_profiles[2:,1]/np.max(radial_profiles[2:,1]), c = 'magenta', label = 'Septin channel')
-    # axes["A"].axvline(x = along_radius[index_border_in], c = 'red', label = 'border in', ls="--")
-    # axes["A"].axvline(x = along_radius[index_border_out], c = 'orange', label = 'border out', ls="--")
-    # axes["A"].axvline(x = radius, c = 'black', label = 'detected radius', ls=":")
-    # axes["A"].axvline(x = size_central_area*radius, c ='green', label = 'central area border')
     axes["A"].set(xlabel = 'radius (px)', ylabel = 'normalized intensity (a.u.)')
-    # axes["A"].legend(loc="upper left", fontsize=10)
     axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
     axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
     axes["B"].set_axis_off()
     axes["C"].set_title("Septin channel", fontsize = 10, pad =-1)
     axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
     axes["C"].set_axis_off()
-    # axes["D"].text(-0.2,0.7,"Background M:  " + str(round(background[0,0],4)), size = 10)
-    # axes["D"].text(-0.2,0.5,"Background S:   " + str(round(background[0,1],4)), size = 10)
-    # axes["D"].text(-0.2,0.0,"Localization S :  " + str(round(localization[0],3)), size = 10)
-    # axes["D"].set_axis_off()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    # Corrected: Removed doubled path injection
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
     
     ## Intensity angular profile:
 
@@ -1698,74 +840,13 @@ def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radiu
     axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
     axes["C"].set_axis_off()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
+    # Corrected: Removed doubled path injection
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
     
     
 def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
     """
-    Plotting of the intensity radial and angular profiles. 
-    Appropriate format when only septin is present.
-    
-    Input
-    -----
-    vesicle_id : int
-        The vesicle's identity number.
-        
-    radius : float
-        The vesicle's radius detected by DisGUVery.   
-    
-    size_central_area : float
-        The central area radius (unit of measure: each vesicles' radius) considered during localization quantification
-    
-    along_radius : np.ndarray
-        The points along the linear profiles, starting from the center of the
-        vesicle. 
-    
-    theta : np.ndarray
-        The angles considered for the linear profiles.
-    
-    radial_profiles : np.ndarray
-        The collective radial intensity profile of the vesicle under study. 
-    
-    angular_profiles : np.ndarray
-        The angular profile along the membrane contour for a given vesicle.
-        The profiles corresponding to the different channels are stored along 
-        the 3rd dimension. 
-        angular_profiles[:,0] corresponds to the membrane channel.
-        angular_profiles[:,1] corresponds to the actin channel. 
-    
-    index_border_in : int
-        The index of the element corresponding to the inner border of the membrane.
-        
-    index_border_out : int
-        The index of the element corresponding to the outer border of the membrane.
-    
-    image_box : np.ndarray
-        The cropped image of the vesicle to be displayed. 
-        image_box[:,:,0] corresponds to the membrane channel.
-        image_box[:,:,1] corresponds to the actin channel. 
-        
-    background : np.ndarray
-        The background noise estimated for the different channels
-        Data related to different 
-        channels are stored along the 3rd dimension of the array:
-        background[:,0] corresponds to the background of the membrane channel.
-        background[:,1] corresponds to the background of the actin channel.    
-    
-    localization : np.ndarray
-        The quantified localization of the protein at the membrane.
-        localization[0] corresponds to the actin channel.
-        
-    path_to_output: str
-        The path to the output folder.   
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
+    Plotting of the intensity radial and angular profiles (Actin only).
     """
     ## Intensity radial profile:
         
@@ -1790,7 +871,8 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["D"].text(-0.2,0.0,"Localization A :  " + str(round(localization[0],3)), size = 10)
     axes["D"].set_axis_off()
     
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    # Corrected: Removed doubled path injection
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
     
     ## Intensity angular profile:
         
@@ -1807,56 +889,13 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow")
     axes["C"].set_axis_off()
 
-    fig.savefig(path_to_output+"\\" + exp_info[3] + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
+    # Corrected: Removed doubled path injection
+    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
 
 
 def edit_output(path_to_output, exp_info, ves_coordinates, background, localization, comment):
     """
-    Adds all relevant information for a single vesicle in a row of the previously
-    created output file.
-
-    Parameters
-    ----------
-    path_to_output : str
-        The path to the folder to output folder.
-    
-    exp_info : list
-        Contains information of the file's name in order:
-        exp_info[0]: the experiment date
-        exp_info[1]: the experiment name
-        exp_info[2]: the name of the image to be analyzed
-        exp_info[3]: full representative name by combining the previous information
-    
-    ves_coordinates : np.ndarrya
-        1-dimensional array with the coordinates of the single vesicle we want 
-        to focus on.  
-        ves_coordinates[0]: vesicle id 
-        ves_coordinates[1]: xc (in px) 
-        ves_coordinates[2]: yc (in px) 
-        ves_coordinates[3]: radius (in px)
-        
-     background : np.ndarray
-         The background noise estimated for the different channels
-         Data related to different 
-         channels are stored along the 3rd dimension of the array:
-         background[:,0] always corresponds to the background of the membrane channel.
-         If only one protein is present:
-         background[:,1] corresponds to the background of that protein's channel.
-         If two proteins are present:
-         background[:,1] corresponds to the background of the septin channel.    
-         background[:,2] corresponds to the background of the actin channel.
-     
-     localization : np.ndarray
-         The quantified localization of the protein(s) at the membrane.
-         If only one protein is present, then localization has a single element
-         corresponding to that protein. 
-         If both proteins are present, localization[0] corresponds to the septin
-         channel and localization[1] corresponds to the actin channel. 
-     
-    comment : list
-         A list of strings with relevant comments explaining (possible) issues 
-         related to the specific vesicle. 
-
+    Adds all relevant information for a single vesicle in a row of the output file.
     """
     list_exp_info        = list(exp_info[:-1])
     list_ves_coordinates = list(ves_coordinates)
@@ -1866,8 +905,8 @@ def edit_output(path_to_output, exp_info, ves_coordinates, background, localizat
 
     vesicle_row = list_exp_info +  list_ves_coordinates + list_background + list_localization + comment 
     
-    with open(path_to_output+"\\" + exp_info[3] + "-Output.csv", "a", newline='') as output_file:
+    # Corrected: Removed doubled path injection
+    with open(path_to_output + "-Output.csv", "a", newline='') as output_file:
                
         writer = csv.writer(output_file)
         writer.writerow(vesicle_row)
-    
