@@ -21,12 +21,11 @@ import skeleton as skl
 # We use raw strings (r"...") to ensure Windows backslashes are read correctly
 path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C1"
 path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C1\Detected"
-# Septin path is left empty for now as Septin = False, but kept for future use
-path_septin       = r"" 
+path_septin       = r"" # Path is left empty for now as Septin = False, but kept for future use
 path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C3"
 
 # Define where you want the output saved 
-path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences"
+path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
 ## Defining which proteins are present (True) or absent (False):
 Septin            = False       
@@ -34,7 +33,7 @@ Actin             = True
 
 ## Defining parameter values for the analysis:
 num_angles        = 360            # number of different equally-spaced linear profiles to be taken into account for a single vesicle
-length_excess     = 1.5            # the length (unit of measure: each vesicles' radius) of the linear profiles to be considered
+length_excess     = 1.2            # the length (unit of measure: each vesicles' radius) of the linear profiles to be considered
 dr                = 1              # the step (in px) between the points sampled along the radial direction for the linear profiles calculation  
 size_mask         = 3              # the length (unit of measure: each vesicles' radius) of the side of the square zoomed-in image, centered at each vesicle, to be considered during background signal calculation
 size_view         = length_excess  # the length (unit of measure: each vesicles' radius) of the side of the square zoomed-in image, centered at each vesicle, used for visual inspection along the final results
@@ -69,14 +68,15 @@ for s in range(num_sets):
     else:
         exp_info = exp_info_all_sets[s,:]
     
-
-    ## Creating output file:
-    path_to_output = path_to_output_root + "\\" + exp_info[3]
-    skl.create_output(path_to_output, exp_info, proteins_present)
+    ## Create Directory Structure: Output/Date_Exp/Region_ID
+    final_output_path = skl.create_directory_structure(path_to_output_root, exp_info)
+    
+    ## Create CSV in the new specific folder
+    output_csv_path = skl.create_output_file(final_output_path, proteins_present)
 
     ## Reading image data (Passing all specific directories):
     channels_data, coordinates = skl.read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present)
-
+    
     ## Creating colormaps following the chosen conventions (if colormaps are not already registered in matplotlib):
     skl.color_maps()
 
@@ -86,7 +86,7 @@ for s in range(num_sets):
     image_dim  = np.array((len(channels_data[0,:,0]), len(channels_data[:,0,0])))
 
     ## Optional plotting of the membrane channel with annotated vesicle centres:
-    skl.detected_centres(plot_detected_centres, num_vesicles, channels_data[:,:,0], coordinates[:,1], coordinates[:,2], path_to_output, exp_info)
+    skl.detected_centres(plot_detected_centres, num_vesicles, channels_data[:,:,0], coordinates[:,1], coordinates[:,2], final_output_path, exp_info)
 
     ## Optional manual choice of thresholding method (default method:Li):
     threshold_membrane = skl.define_threshold(threshold_method_manual, channels_data[:,:,0], size_mask, image_dim, coordinates[0,:]) 
@@ -107,18 +107,18 @@ for s in range(num_sets):
             background = np.zeros((1, num_channels))
             localization = np.zeros(num_channels-1)
             comment = ["margins"]
-            skl.edit_output(path_to_output, exp_info, coordinates[i,:], background, localization, comment)
+            skl.edit_output(final_output_path, exp_info, coordinates[i,:], background, localization, comment)
             continue
         
         ## Calculating the background signal based on the vesicles' vicinity (with optional plotting of the corresponding calculated mask):
-        background = skl.background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, coordinates[i,:], threshold_membrane, path_to_output, exp_info)
+        background = skl.background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, coordinates[i,:], threshold_membrane, final_output_path, exp_info)
 
         ## Background signal removal:
         intensity_profiles_corrected = skl.background_correction(num_channels, intensity_profiles, background)
-
+        
         ## Calculation of the collective radial profile of the requested vesicle:
         radial_profiles = skl.radial_profile(num_channels, intensity_profiles_corrected)
-     
+        
         ## Correction for bias of the first pixels due to multi-counting:
         pixels_to_remove = 2
         radial_profiles  = radial_profiles[pixels_to_remove:,:]
@@ -126,15 +126,21 @@ for s in range(num_sets):
         
         ## Membrane border detection:
         index_border_in, index_border_out, comment_peak, death_mark_peak = skl.membrane_detection(radial_profiles[:,0], coordinates[i,3])
+       
         ## Registration of the triggered conditions for automatic vesicle rejection:
         if comment_peak:
             comment = comment + comment_peak
-        ## Output for profiles where no peak was detected is set to 0:
+            
+        # Generate DEBUG Overlay Image
+        # This will save an image with yellow spokes and red/orange circles
+        skl.plot_debug_overlay(coordinates[i,:], coordinates[i,3], index_border_in, index_border_out, 
+                               image_dim, channels_data, along_radius, theta, final_output_path)
+
         if death_mark_peak == True:
             background = np.zeros((1, num_channels))
             localization = np.zeros(num_channels-1)
             comment = comment_peak
-            skl.edit_output(path_to_output, exp_info, coordinates[i,:], background, localization, comment)
+            skl.edit_output(final_output_path, exp_info, coordinates[i,:], background, localization, comment)
             continue
         
         ## Marking of vesicles with low septin signal inside:
@@ -157,7 +163,7 @@ for s in range(num_sets):
             comment = [', '.join(comment)]
             background = np.zeros((1, num_channels))
             localization = np.zeros(num_channels-1)
-            skl.edit_output(path_to_output, exp_info, coordinates[i,:], background, localization, comment)
+            skl.edit_output(final_output_path, exp_info, coordinates[i,:], background, localization, comment)
             continue
         
         ## Quantification of protein localization on the membrane:
@@ -173,12 +179,12 @@ for s in range(num_sets):
             
       
         ## Optional plotting the intensity profiles:
-        skl.plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_sizes, channels_data, coordinates[i,:], image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, path_to_output, exp_info)
-    
+        skl.plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_sizes, channels_data, coordinates[i,:], image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, final_output_path, exp_info)
+        
         ## Saving data in output file:
         if not comment:
             comment = ["OK"]
         else:
             comment = [', '.join(comment)]
             
-        skl.edit_output(path_to_output, exp_info, coordinates[i,:], background, localization, comment)
+        skl.edit_output(final_output_path, exp_info, coordinates[i,:], background, localization, comment)

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Created on Tue Nov 15 15:33:44 2022
+Updated: 2025
 
-@author: kkourkoulou
+@author: kkourkoulou (Updated by Gemini)
 
 Script to calculate the radial and angular intensity profiles of GUVs 
 encapsulating septin and/or actin and to quantify the corresponding protein
@@ -21,8 +22,16 @@ import csv
 from skimage.filters import try_all_threshold                                  
 from skimage.filters import threshold_li, threshold_otsu, threshold_yen, \
                             threshold_isodata, threshold_mean, threshold_minimum, threshold_triangle
+
+from skimage.transform import hough_circle, hough_circle_peaks
+from skimage.feature import canny
+
 from scipy import ndimage as nd                                                
-from scipy.signal import find_peaks, peak_widths                             
+from scipy.signal import find_peaks, peak_widths
+from scipy.ndimage import map_coordinates, gaussian_filter1d                
+import cv2        
+
+                      
 
 
 def find_projects_info(path_membrane):
@@ -59,6 +68,22 @@ def find_projects_info(path_membrane):
     
     return exp_info_all_sets
 
+def create_directory_structure(path_to_output_root, exp_info):
+    """
+    Creates a hierarchical folder structure:
+    Root -> Date_Experiment -> Region_ID
+    Returns the final path for saving files.
+    """
+    date_experiment = exp_info[0] # e.g., 20251110_BranchedCortex
+    region_id = exp_info[1]       # e.g., Region0000
+    
+    # Create the full path
+    final_output_path = os.path.join(path_to_output_root, date_experiment, region_id)
+    
+    if not os.path.exists(final_output_path):
+        os.makedirs(final_output_path)
+        
+    return final_output_path
 
 def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present):
     """
@@ -100,17 +125,15 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
     coordinates[:, 0] = np.arange(1, len(detected_vesicles) + 1)
     coordinates[:, 1] = detected_vesicles.iloc[:, 0].values  # X coordinate
     coordinates[:, 2] = detected_vesicles.iloc[:, 1].values  # Y coordinate  
-    coordinates[:, 3] = detected_vesicles.iloc[:, 2].values  # Radius/size
+    coordinates[:, 3] = detected_vesicles.iloc[:, 2].values / 2  # Convert Diameter to Radius
     
     return channels_data, coordinates
 
 
-def create_output(path_to_output, exp_info, proteins_present):
+def create_output_file(final_output_path, proteins_present):
     """
-    Creates an empty output directory and an output file.
+    Creates an empty output CSV file in the specific folder.
     """
-    os.makedirs(os.path.dirname(path_to_output), exist_ok= True)
-        
     protein_status = plot_format(proteins_present)
     
     if protein_status == "both_proteins":
@@ -122,9 +145,13 @@ def create_output(path_to_output, exp_info, proteins_present):
     if protein_status == "only_actin":
         column_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius", "M Background", "A Background", "A localization", "Comment"]
 
-    with open(path_to_output + "-Output.csv", "w", newline='') as output_file:
+    output_csv_path = os.path.join(final_output_path, "Analysis_Results.csv")
+    
+    with open(output_csv_path, "w", newline='') as output_file:
         df = csv.DictWriter(output_file, delimiter=',', fieldnames = column_headers)
         df.writeheader()
+        
+    return output_csv_path
         
     
 def color_maps():
@@ -156,7 +183,7 @@ def color_maps():
         plt.colormaps.register(cmap=cmap_yellow)
 
     
-def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, path_to_output, exp_info):
+def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, final_output_path, exp_info):
     """
     Displays the image to be analyzed with the centers of the vesicles.
     """
@@ -169,13 +196,14 @@ def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, path_to
         for i in range(num_vesicles):
             plt.annotate(i+1, (all_xc[i]+5, all_yc[i]-5), c = 'red') 
         
-        plt.savefig(path_to_output + "-Detected_centres.png")
+        plt.savefig(os.path.join(final_output_path, "Overview_Detected_Centres.png"))
 
 
 def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     """
     Creates a square cropped view of a chosen vesicle. 
-    Robustly handles cases where the crop box is larger than the image dimensions.
+    Correctly handles padding so the vesicle remains centered 
+    even when close to the image edge.
     """
     xc               = ves_coordinates[1]
     yc               = ves_coordinates[2]
@@ -184,48 +212,36 @@ def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     vesicle_box_side = int(size_side * radius)
     expected_size    = 2 * vesicle_box_side
     
-    move_right = 0
-    move_left  = 0
-    move_up    = 0
-    move_down  = 0
-
-    # Calculate shifts to keep the window within image bounds if possible
-    if xc - vesicle_box_side < 0: 
-        move_right = vesicle_box_side - xc
-                  
-    if xc + vesicle_box_side > image_dim[0]: 
-        move_left  = vesicle_box_side - (image_dim[0]-xc)   
-        
-    if yc - vesicle_box_side < 0: 
-        move_down  = vesicle_box_side - yc           
-                      
-    if yc + vesicle_box_side > image_dim[1]: 
-        move_up    = vesicle_box_side - (image_dim[1]-yc)   
+    # Define the ideal boundaries (might be negative or out of bounds)
+    y_start_ideal = int(yc - vesicle_box_side)
+    y_end_ideal   = int(yc + vesicle_box_side)
+    x_start_ideal = int(xc - vesicle_box_side)
+    x_end_ideal   = int(xc + vesicle_box_side)
     
-    # Define slice indices
-    y_start = int(yc - vesicle_box_side + move_down - move_up)
-    y_end   = int(yc + vesicle_box_side + move_down - move_up)
-    x_start = int(xc - vesicle_box_side + move_right - move_left)
-    x_end   = int(xc + vesicle_box_side - move_left + move_right)
+    # Define the valid slice within the image dimensions
+    y_start_valid = max(0, y_start_ideal)
+    y_end_valid   = min(image_dim[1], y_end_ideal)
+    x_start_valid = max(0, x_start_ideal)
+    x_end_valid   = min(image_dim[0], x_end_ideal)
     
     # Perform the slice
-    # Note: Python slices automatically clip to valid ranges (e.g. 0 to 2048)
-    vesicle_box_channel = channel[max(0, y_start):max(0, y_end), max(0, x_start):max(0, x_end)]
+    vesicle_slice = channel[y_start_valid:y_end_valid, x_start_valid:x_end_valid]
     
-    # Check if the resulting slice matches the expected size
-    if vesicle_box_channel.shape != (expected_size, expected_size):
-        # Create a full-size black canvas
+    # Check if we need padding
+    if vesicle_slice.shape != (expected_size, expected_size):
         padded_box = np.zeros((expected_size, expected_size), dtype=channel.dtype)
         
-        # Paste the valid image data into the canvas
-        # We align it based on the effective valid data size we retrieved
-        h, w = vesicle_box_channel.shape
-        padded_box[:h, :w] = vesicle_box_channel
+        # Calculate where to paste the slice in the padded box
+        # Offset is determined by how much we clipped from the left/top
+        paste_y = max(0, -y_start_ideal)
+        paste_x = max(0, -x_start_ideal)
+        
+        h_slice, w_slice = vesicle_slice.shape
+        padded_box[paste_y:paste_y+h_slice, paste_x:paste_x+w_slice] = vesicle_slice
         
         return padded_box
     
-    return vesicle_box_channel
-
+    return vesicle_slice
 
 def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates):    
     """
@@ -261,6 +277,92 @@ def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates
         
     return threshold
 
+def refine_guv_center(image, center_guess, radius_estimate, search_box_factor=1.5):
+    xc, yc = center_guess
+    
+    # 1. Define ROI
+    box_half_width = int(radius_estimate * search_box_factor)
+    x_start = int(max(0, xc - box_half_width))
+    x_end = int(min(image.shape[1], xc + box_half_width))
+    y_start = int(max(0, yc - box_half_width))
+    y_end = int(min(image.shape[0], yc + box_half_width))
+    
+    if x_start >= x_end or y_start >= y_end: return center_guess
+    
+    roi = image[y_start:y_end, x_start:x_end]
+    roi_center_x = xc - x_start
+    roi_center_y = yc - y_start
+    
+    # 2. Pre-processing (CLAHE + Blur)
+    if roi.size == 0: return center_guess
+    roi_norm = cv2.normalize(roi, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8,8)) # Aggressive contrast
+    roi_eq = clahe.apply(roi_norm)
+    roi_smooth = cv2.GaussianBlur(roi_eq, (5, 5), 0)
+
+    # 3. Edge Detection (Canny)
+    edges = cv2.Canny(roi_smooth, 30, 100)
+    
+    # 4. Calculate Gradients (Sobel)
+    # We need this to check the DIRECTION of the edges
+    gx = cv2.Sobel(roi_smooth, cv2.CV_64F, 1, 0, ksize=5)
+    gy = cv2.Sobel(roi_smooth, cv2.CV_64F, 0, 1, ksize=5)
+    
+    # 5. GRADIENT ORIENTATION FILTER (The Fix for Vesicle 4)
+    # Iterate through all edge pixels and check if they point to our center
+    y_edge, x_edge = np.where(edges > 0)
+    
+    # Vector from estimated center to pixel
+    rx = x_edge - roi_center_x
+    ry = y_edge - roi_center_y
+    r_norm = np.sqrt(rx**2 + ry**2)
+    r_norm[r_norm == 0] = 1 # Safety
+    
+    # Gradient vector at that pixel
+    g_x_val = gx[y_edge, x_edge]
+    g_y_val = gy[y_edge, x_edge]
+    g_norm = np.sqrt(g_x_val**2 + g_y_val**2)
+    g_norm[g_norm == 0] = 1 # Safety
+    
+    # Dot Product: (Gradient) dot (Radius)
+    # If aligned, dot_product approx 1.0. If neighbor, it will be low or negative.
+    dot_product = np.abs((g_x_val/g_norm) * (rx/r_norm) + (g_y_val/g_norm) * (ry/r_norm))
+    
+    # Keep only edges that are aligned with the radius (Tolerance > 0.6)
+    valid_indices = dot_product > 0.6
+    
+    # Reconstruct the "Cleaned" Edge Image
+    clean_edges = np.zeros_like(edges)
+    clean_edges[y_edge[valid_indices], x_edge[valid_indices]] = 255
+    
+    # 6. Distance Masking (Tightened slightly)
+    h, w = roi.shape
+    Y, X = np.ogrid[:h, :w]
+    dist_from_guess = np.sqrt((X - roi_center_x)**2 + (Y - roi_center_y)**2)
+    
+    # Mask [0.75 * R to 1.25 * R] 
+    mask = (dist_from_guess > radius_estimate * 0.75) & \
+           (dist_from_guess < radius_estimate * 1.25)
+    clean_edges[~mask] = 0
+    
+    if np.sum(clean_edges) < 10: return center_guess
+
+    # 7. Circular Hough Transform
+    hough_radii = np.arange(int(radius_estimate * 0.8), int(radius_estimate * 1.2), 2)
+    
+    if len(hough_radii) == 0: return center_guess
+    
+    # Perform Hough on CLEAN edges only
+    hough_res = hough_circle(clean_edges, hough_radii)
+    
+    accums, cx, cy, radii = hough_circle_peaks(hough_res, hough_radii, total_num_peaks=1)
+    
+    if len(cx) == 0: return center_guess
+    
+    xc_new = cx[0]
+    yc_new = cy[0]
+
+    return (x_start + xc_new, y_start + yc_new)
     
 def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profiles):
     """
@@ -271,6 +373,12 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
     xc             = ves_coordinates[1]
     yc             = ves_coordinates[2]
     radius         = ves_coordinates[3]
+    
+    xc_refined, yc_refined = refine_guv_center(channels_data[:,:,0], (xc, yc), radius)
+    
+    # Store refined coordinates in ves_coordinates for later use (plotting)
+    ves_coordinates[1] = xc_refined
+    ves_coordinates[2] = yc_refined
     
     num_angles     = int(parameters_profiles[0])
     length_excess  = parameters_profiles[1]
@@ -285,18 +393,20 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
     intensity_profiles = np.zeros((profile_radius, num_angles, num_channels))
     
     death_mark = False
-    if xc + profile_radius_limit >= image_dim[0] or xc - profile_radius_limit < 0 or yc + profile_radius_limit >= image_dim[1] or yc - profile_radius_limit < 0:
+    if xc_refined + profile_radius_limit >= image_dim[0] or xc_refined - profile_radius_limit < 0 or \
+       yc_refined + profile_radius_limit >= image_dim[1] or yc_refined - profile_radius_limit < 0:
         death_mark = True
         return intensity_profiles, along_radius, theta, death_mark
           
-    line_x       = np.full((profile_radius, num_angles), int(xc)) + np.rint(np.matmul(np.transpose(np.asmatrix(along_radius)),np.asmatrix(np.cos(theta))))
-    line_y       = np.full((profile_radius, num_angles), int(yc)) + np.rint(np.matmul(np.transpose(np.asmatrix(along_radius)),np.asmatrix(np.sin(theta))))
+    x_coords = xc_refined + along_radius[np.newaxis, :] * np.cos(theta[:, np.newaxis])
+    y_coords = yc_refined + along_radius[np.newaxis, :] * np.sin(theta[:, np.newaxis])
     
-    for i in range(profile_radius):
-        for j in range((num_angles)): 
-            for k in range(num_channels):
-                    channel = channels_data[:,:,k]
-                    intensity_profiles[i,j,k] = channel[int(line_y[i,j]), int(line_x[i,j])]          
+    coords = np.stack([y_coords.ravel(), x_coords.ravel()], axis=0)
+    
+    for k in range(num_channels):
+        channel = channels_data[:,:,k]
+        profiles_flat = map_coordinates(channel, coords, order=1, mode='constant', cval=0.0)
+        intensity_profiles[:,:,k] = profiles_flat.reshape(num_angles, profile_radius).T
              
     return intensity_profiles, along_radius, theta, death_mark
     
@@ -346,7 +456,7 @@ def fill_in_mask(mask_memb):
     return mask_memb_fill
 
 
-def background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, ves_coordinates, threshold, path_to_output, exp_info):
+def background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, ves_coordinates, threshold, final_output_path, exp_info):
     """
     Calculation of the background noise.
     """
@@ -366,19 +476,14 @@ def background_noise(plot_mask, channels_data, proteins_present, size_mask, imag
     for i in range(num_channels):
         background[:,i] = np.mean(np.ma.array(vesicle_box[:,:,i], mask=mask_memb_fill))
     
-    
     if plot_mask == True:
-    
         protein_status = plot_format(proteins_present)    
-    
         if protein_status == "both_proteins":
-            show_mask_both(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, path_to_output, exp_info)
-        
+            show_mask_both(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, final_output_path, exp_info)
         elif protein_status == "only_septin":
-            show_mask_only_sept(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, path_to_output, exp_info)
-            
+            show_mask_only_sept(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, final_output_path, exp_info)
         elif protein_status == "only_actin":
-            show_mask_only_actin(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, path_to_output, exp_info)
+            show_mask_only_actin(int(ves_coordinates[0]), vesicle_box, mask_memb_fill, background, final_output_path, exp_info)
     
     return background
 
@@ -420,7 +525,8 @@ def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_
     ax4.set_axis_off()
     plt.show()
     
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+    filename = f"Vesicle_{vesicle_id}_Channels_and_Mask.png"
+    fig.savefig(os.path.join(path_to_output, filename))
 
     
 def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
@@ -441,7 +547,8 @@ def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, pat
    plt.show()
 
    # Corrected: Removed doubled path injection
-   fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+   filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
+   fig.savefig(os.path.join(path_to_output, filename))
 
 
 def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
@@ -462,7 +569,8 @@ def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, pa
    plt.show()
   
    # Corrected: Removed doubled path injection
-   fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Channels_and_Mask.png")
+   filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
+   fig.savefig(os.path.join(path_to_output, filename))
 
 
 def background_correction(num_channels, intensity_profiles, background):
@@ -492,83 +600,63 @@ def radial_profile(num_channels, intensity_profiles):
 def membrane_detection(radial_profile_memb, radius):
     """
     Detection of the membrane inner and outer borders.
+    Updated to capture full membrane tails.
     """
     comment = []
     death_mark = False
     
-    # Find peaks with adjusted parameters for better detection
+    # Find peaks
     peaks, properties = find_peaks(radial_profile_memb, 
-                                   height=np.max(radial_profile_memb) * 0.1,  # At least 10% of max
+                                   height=np.max(radial_profile_memb) * 0.1, 
                                    distance=5, 
-                                   prominence=np.max(radial_profile_memb) * 0.05)  # At least 5% prominence
+                                   prominence=np.max(radial_profile_memb) * 0.05)
     
     if not np.any(peaks):
-        index_border_in  = 0
-        index_border_out = 0 
-        comment          = ["no_memb_peak"]
-        death_mark       = True
-        return index_border_in, index_border_out, comment, death_mark
+        return 0, 0, ["no_memb_peak"], True
     
-    # If only one peak, use it
+    # Peak Selection Logic (Same as before)
     if len(peaks) == 1:
         chosen_peak = 0
     else:
-        # Multiple peaks - choose the best one based on several criteria
         peak_scores = []
-        
         for i, peak_pos in enumerate(peaks):
-            score = 0
-            
-            # Criterion 1: Prefer peaks closer to the expected radius (higher weight)
-            distance_to_expected = abs(peak_pos - radius)
-            distance_score = 1.0 / (1.0 + distance_to_expected / radius)  # Normalized distance score
-            score += distance_score * 3.0  # High weight for position
-            
-            # Criterion 2: Prefer higher peaks
+            dist_score = 1.0 / (1.0 + abs(peak_pos - radius) / radius)
             height_score = radial_profile_memb[peak_pos] / np.max(radial_profile_memb)
-            score += height_score * 2.0  # Medium weight for height
-            
-            # Criterion 3: Prefer peaks with good prominence
-            prominence_score = properties['prominences'][i] / np.max(properties['prominences'])
-            score += prominence_score * 1.0  # Lower weight for prominence
-            
-            # Criterion 4: Penalize peaks that are too early (likely noise)
-            if peak_pos < radius * 0.3:  # If peak is less than 30% of expected radius
-                score *= 0.5  # Reduce score significantly
-            
-            # Criterion 5: Penalize peaks that are too late (likely artifacts)
-            if peak_pos > radius * 2.0:  # If peak is more than 2x expected radius
-                score *= 0.3  # Reduce score significantly
-                
+            score = dist_score * 3.0 + height_score * 2.0
             peak_scores.append(score)
-        
-        # Choose the peak with the highest score
         chosen_peak = np.argmax(peak_scores)
-        
-        # Add comment if we had to choose among many peaks
-        if len(peaks) > 2:
-            comment.append("multiple_peaks")
     
-    # Calculate width at half maximum for the chosen peak
+    # --- CHANGED SECTION START ---
     try:
-        width_half_max = peak_widths(radial_profile_memb, [peaks[chosen_peak]], rel_height=0.5)
-        index_border_in = int(np.rint(width_half_max[2][0]))
-        index_border_out = int(np.rint(width_half_max[3][0]))
+        # Measure width at 75% height (lower down the peak) to capture tails
+        # Standard FWHM is 0.5; using 0.75 captures more of the base
+        # Note: peak_widths returns (widths, width_heights, left_ips, right_ips)
+        width_results = peak_widths(radial_profile_memb, [peaks[chosen_peak]], rel_height=0.75)
+        
+        # Get interpolated indices
+        left_idx = width_results[2][0]
+        right_idx = width_results[3][0]
+        
+        # Add PADDING to ensure we don't cut off signal
+        # This prevents "leaking" signal into the background calculation
+        padding = 3  # pixels
+        
+        index_border_in = int(np.floor(left_idx - padding))
+        index_border_out = int(np.ceil(right_idx + padding))
+        
+        # Safety clamp
+        index_border_in = max(0, index_border_in)
+        index_border_out = min(len(radial_profile_memb)-1, index_border_out)
+        
     except:
-        # Fallback if width calculation fails
-        index_border_in = max(0, peaks[chosen_peak] - 5)
-        index_border_out = min(len(radial_profile_memb) - 1, peaks[chosen_peak] + 5)
+        index_border_in = max(0, peaks[chosen_peak] - 8)
+        index_border_out = min(len(radial_profile_memb) - 1, peaks[chosen_peak] + 8)
         comment.append("width_calc_failed")
+    # --- CHANGED SECTION END ---
     
     # Quality checks
-    if index_border_out - index_border_in > radius/4:
+    if index_border_out - index_border_in > radius/3: # Relaxed check for wider inclusion
         comment.append("wide_peak")
-    
-    if np.average(radial_profile_memb[:index_border_in]) >= 0.3 * radial_profile_memb[peaks[chosen_peak]]:
-        comment.append("lipids_inside")
-    
-    if len(radial_profile_memb) > index_border_out and np.average(radial_profile_memb[index_border_out:]) >= 0.4 * radial_profile_memb[peaks[chosen_peak]]:
-        comment.append("clusters_outside")
     
     return index_border_in, index_border_out, comment, death_mark
 
@@ -674,6 +762,16 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
     return comments
 
 
+def check_membrane_quality(angular_profiles, radial_profiles, radius):
+    comments = []
+    membrane_angular = angular_profiles[:,0]
+    
+    if np.mean(membrane_angular) > 0:
+        cv_membrane = np.std(membrane_angular) / np.mean(membrane_angular)
+        if cv_membrane > 0.4: comments.append("very_irregular_membrane")
+    
+    return comments
+
 def angular_profile(num_channels, intensity_profiles, index_border_in, index_border_out, pixels_to_remove):
     """
     Calculation of the angular profile along the membrane contour.
@@ -718,6 +816,54 @@ def localization(num_channels, angular_profiles, radial_profiles, index_border_i
         localization[i]   = np.clip(loc_numerator[i]/loc_denominator[i],0,None)
     
     return localization, comment
+
+
+def plot_debug_overlay(ves_coordinates, radius, index_border_in, index_border_out, 
+                       image_dim, channels_data, along_radius, theta, 
+                       final_output_path):
+    """
+    Plots a debug image showing:
+    1. Radial spokes (every 10th line)
+    2. Detected Membrane borders (Inner/Outer)
+    3. Background region (box)
+    """
+    xc = ves_coordinates[1]
+    yc = ves_coordinates[2]
+    
+    # Create zoom box
+    size_view = 2.0  # View 2x radius
+    membrane_channel = channels_data[:,:,0]
+    vesicle_img = zoom_in_vesicle(membrane_channel, size_view, image_dim, ves_coordinates)
+    
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+    ax.imshow(vesicle_img, cmap='gray')
+    ax.set_title(f"Debug: Vesicle {int(ves_coordinates[0])}")
+    
+    # Image center in zoomed coordinates
+    center_img = vesicle_img.shape[0] // 2
+    
+    # 1. Plot Radial Spokes (Yellow) - Plot every 15th line to avoid clutter
+    for angle in theta[::15]:
+        r_max = along_radius[-1]
+        x_end = center_img + r_max * np.cos(angle)
+        y_end = center_img + r_max * np.sin(angle)
+        ax.plot([center_img, x_end], [center_img, y_end], color='yellow', alpha=0.3, lw=0.5)
+
+    # 2. Plot Detected Borders (Red/Orange Circles)
+    radius_in = along_radius[index_border_in]
+    radius_out = along_radius[index_border_out]
+    
+    circ_in = plt.Circle((center_img, center_img), radius_in, color='red', fill=False, lw=1.5, label='Inner Border')
+    circ_out = plt.Circle((center_img, center_img), radius_out, color='orange', fill=False, lw=1.5, label='Outer Border')
+    ax.add_patch(circ_in)
+    ax.add_patch(circ_out)
+    
+    # 3. Add Legend
+    ax.legend(loc='upper right', fontsize='small')
+    ax.axis('off')
+    
+    fig.savefig(os.path.join(final_output_path, f"Vesicle_{int(ves_coordinates[0])}_DEBUG.png"))
+    plt.close(fig)
 
 
 def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, path_to_output, exp_info):
@@ -780,7 +926,9 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["E"].text(-0.2,-0.2,"Localization A :  " + str(round(localization[1],3)), size = 10)
     axes["E"].set_axis_off()
     
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
+    fig.savefig(os.path.join(path_to_output, filename))
+    
     
     ## Intensity angular profile:
 
@@ -801,7 +949,9 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow")
     axes["D"].set_axis_off()
     
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
+    
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
+    fig.savefig(os.path.join(path_to_output, filename))
 
     
 def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
@@ -822,8 +972,9 @@ def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radiu
     axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
     axes["C"].set_axis_off()
     
-    # Corrected: Removed doubled path injection
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    # Corrected: Removed doubled path injection   
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
+    fig.savefig(os.path.join(path_to_output, filename))
     
     ## Intensity angular profile:
 
@@ -841,8 +992,9 @@ def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radiu
     axes["C"].set_axis_off()
     
     # Corrected: Removed doubled path injection
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
-    
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
+    fig.savefig(os.path.join(path_to_output, filename))
+        
     
 def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
     """
@@ -872,7 +1024,8 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["D"].set_axis_off()
     
     # Corrected: Removed doubled path injection
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Radial.png")
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
+    fig.savefig(os.path.join(path_to_output, filename))
     
     ## Intensity angular profile:
         
@@ -890,10 +1043,10 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["C"].set_axis_off()
 
     # Corrected: Removed doubled path injection
-    fig.savefig(path_to_output + "-Vesicle_" + str(vesicle_id) + "-Int_prof_Angular.png")
+    filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
+    fig.savefig(os.path.join(path_to_output, filename))
 
-
-def edit_output(path_to_output, exp_info, ves_coordinates, background, localization, comment):
+def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, comment):
     """
     Adds all relevant information for a single vesicle in a row of the output file.
     """
@@ -902,11 +1055,8 @@ def edit_output(path_to_output, exp_info, ves_coordinates, background, localizat
     list_background      = list(background[0,:])
     list_localization    = list(localization)
 
-
     vesicle_row = list_exp_info +  list_ves_coordinates + list_background + list_localization + comment 
     
-    # Corrected: Removed doubled path injection
-    with open(path_to_output + "-Output.csv", "a", newline='') as output_file:
-               
+    with open(os.path.join(final_output_path, "Analysis_Results.csv"), "a", newline='') as output_file:
         writer = csv.writer(output_file)
         writer.writerow(vesicle_row)
