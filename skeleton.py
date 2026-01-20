@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Nov 15 15:33:44 2022
-Updated: 2025
+skeleton.py
+
+Contains all necessary functions for the GUV analysis pipeline.
+Updated to include:
+- Automatic pixel size detection (tifffile)
+- Robust localization calculation (np.max)
+- Actin cortical thickness and density metrics
+- Physical unit plotting (microns)
 
 @author: kkourkoulou (Updated by Gemini)
-
-Script to calculate the radial and angular intensity profiles of GUVs 
-encapsulating septin and/or actin and to quantify the corresponding protein
-localization on the vesicle membrane. 
- 
-main.py     :    main file to run the script
-skeleton.py :    file with all necessary functions in main.py
 """
 
 import os
@@ -18,20 +17,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap 
 import pandas as pd                                                             
-import csv                         
+import csv               
+          
 from skimage.filters import try_all_threshold                                  
 from skimage.filters import threshold_li, threshold_otsu, threshold_yen, \
                             threshold_isodata, threshold_mean, threshold_minimum, threshold_triangle
-
 from skimage.transform import hough_circle, hough_circle_peaks
 from skimage.feature import canny
 
 from scipy import ndimage as nd                                                
 from scipy.signal import find_peaks, peak_widths
-from scipy.ndimage import map_coordinates, gaussian_filter1d                
-import cv2        
-
-                      
+from scipy.ndimage import map_coordinates, gaussian_filter1d               
+import cv2
+import tifffile  # Required for metadata reading
 
 
 def find_projects_info(path_membrane):
@@ -66,13 +64,11 @@ def find_projects_info(path_membrane):
             
             set_of_data += 1
     
-    return exp_info_all_sets
+    return exp_info_all_sets                     
 
 def create_directory_structure(path_to_output_root, exp_info):
     """
-    Creates a hierarchical folder structure:
-    Root -> Date_Experiment -> Region_ID
-    Returns the final path for saving files.
+    Creates a hierarchical folder structure: Root -> Date_Experiment -> Region_ID
     """
     date_experiment = exp_info[0] # e.g., 20251110_BranchedCortex
     region_id = exp_info[1]       # e.g., Region0000
@@ -88,12 +84,33 @@ def create_directory_structure(path_to_output_root, exp_info):
 def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present):
     """
     Function that reads the image files and the vesicle detection from separate folders.
+    UPDATED: Now detects pixel size from metadata.
     """
     file_stem = exp_info[3]
     
     # 1. Read Membrane (C1) - Always present
     c1_path = os.path.join(path_membrane, file_stem + "-C1.tif")
     channels_data = plt.imread(c1_path)
+    
+    # --- Detect Pixel Size ---
+    pixel_size = 0.07 # Default fallback
+    try:
+        with tifffile.TiffFile(c1_path) as tif:
+            # Check ImageJ metadata (common for Fiji exports)
+            imagej_metadata = tif.imagej_metadata
+            if imagej_metadata and 'spacing' in imagej_metadata:
+                pixel_size = float(imagej_metadata['spacing'])
+            # Check standard XResolution tags
+            elif tif.pages[0].tags.get('XResolution'):
+                x_res = tif.pages[0].tags['XResolution'].value
+                # If unit is cm (3), convert to um. Res is px/unit. Size = 1/Res.
+                if tif.pages[0].tags.get('ResolutionUnit').value == 3: #
+                    pixel_size = 10000.0 / (x_res[0]/x_res[1])
+                # Note: If unit is 'Inch' or 'None', logic may vary, keeping default
+    except:
+        print(f"Warning: Could not detect pixel size for {file_stem}. Using 1.0.")
+    
+    print(f"Processing: {file_stem} (Pixel Size: {pixel_size:.4f} um)")
     
     # 2. Read Septin (C2) - If present
     if proteins_present[0] == True:
@@ -115,35 +132,43 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
     csv_path = os.path.join(path_detected, file_stem + "-detected_vesicles.csv")
     detected_vesicles = pd.read_csv(csv_path)
     
-    # Print data for debugging
-    print(f"Processing: {file_stem}")
-    
-    # Create coordinates array 
+    # Create coordinates array [ID, xc, yc, radius]
     coordinates = np.zeros((len(detected_vesicles), 4))
     
     # ID, xc, yc, radius
     coordinates[:, 0] = np.arange(1, len(detected_vesicles) + 1)
-    coordinates[:, 1] = detected_vesicles.iloc[:, 0].values  # X coordinate
-    coordinates[:, 2] = detected_vesicles.iloc[:, 1].values  # Y coordinate  
-    coordinates[:, 3] = detected_vesicles.iloc[:, 2].values / 2  # Convert Diameter to Radius
+    coordinates[:, 1] = detected_vesicles.iloc[:, 0].values      # x coordinate
+    coordinates[:, 2] = detected_vesicles.iloc[:, 1].values      # y coordinate
+    coordinates[:, 3] = detected_vesicles.iloc[:, 2].values / 2  # convert diameter to radius
     
-    return channels_data, coordinates
+    return channels_data, coordinates, pixel_size
 
 
 def create_output_file(final_output_path, proteins_present):
     """
     Creates an empty output CSV file in the specific folder.
+    UPDATED: Added headers for new metrics (t_cortex, rho_actin, uniformity, refined radius).
     """
     protein_status = plot_format(proteins_present)
     
+    base_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius"]
+    
     if protein_status == "both_proteins":
-        column_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius", "M Background", "S Background", "A Background", "S localization", "A localization", "Comment"]
+        specific_headers = ["M Background", "S Background", "A Background", 
+                            "S localization", "A localization", 
+                            "t_cortex", "rho_actin", "uniformity", 
+                            "Refined Radius (um)", "Comment"] 
 
     if protein_status == "only_septin":
-        column_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius", "M Background", "S Background", "S localization", "Comment"]
+        specific_headers = ["M Background", "S Background", "S localization", 
+                            "Refined Radius (um)", "Comment"] 
 
     if protein_status == "only_actin":
-        column_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius", "M Background", "A Background", "A localization", "Comment"]
+        specific_headers = ["M Background", "A Background", "A localization", 
+                            "t_cortex", "rho_actin", "uniformity", 
+                            "Refined Radius (um)", "Comment"] 
+
+    column_headers = base_headers + specific_headers
 
     output_csv_path = os.path.join(final_output_path, "Analysis_Results.csv")
     
@@ -202,8 +227,7 @@ def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, final_o
 def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     """
     Creates a square cropped view of a chosen vesicle. 
-    Correctly handles padding so the vesicle remains centered 
-    even when close to the image edge.
+    Correctly handles padding so the vesicle remains centered.
     """
     xc               = ves_coordinates[1]
     yc               = ves_coordinates[2]
@@ -212,17 +236,16 @@ def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     vesicle_box_side = int(size_side * radius)
     expected_size    = 2 * vesicle_box_side
     
-    # Define the ideal boundaries (might be negative or out of bounds)
-    y_start_ideal = int(yc - vesicle_box_side)
-    y_end_ideal   = int(yc + vesicle_box_side)
-    x_start_ideal = int(xc - vesicle_box_side)
-    x_end_ideal   = int(xc + vesicle_box_side)
+    y_start_ideal    = int(yc - vesicle_box_side)
+    y_end_ideal      = int(yc + vesicle_box_side)
+    x_start_ideal    = int(xc - vesicle_box_side)
+    x_end_ideal      = int(xc + vesicle_box_side)
     
     # Define the valid slice within the image dimensions
-    y_start_valid = max(0, y_start_ideal)
-    y_end_valid   = min(image_dim[1], y_end_ideal)
-    x_start_valid = max(0, x_start_ideal)
-    x_end_valid   = min(image_dim[0], x_end_ideal)
+    y_start_valid    = max(0, y_start_ideal)
+    y_end_valid      = min(image_dim[1], y_end_ideal)
+    x_start_valid    = max(0, x_start_ideal)
+    x_end_valid      = min(image_dim[0], x_end_ideal)
     
     # Perform the slice
     vesicle_slice = channel[y_start_valid:y_end_valid, x_start_valid:x_end_valid]
@@ -230,12 +253,9 @@ def zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates):
     # Check if we need padding
     if vesicle_slice.shape != (expected_size, expected_size):
         padded_box = np.zeros((expected_size, expected_size), dtype=channel.dtype)
-        
         # Calculate where to paste the slice in the padded box
         # Offset is determined by how much we clipped from the left/top
-        paste_y = max(0, -y_start_ideal)
-        paste_x = max(0, -x_start_ideal)
-        
+        paste_y, paste_x = max(0, -y_start_ideal), max(0, -x_start_ideal)
         h_slice, w_slice = vesicle_slice.shape
         padded_box[paste_y:paste_y+h_slice, paste_x:paste_x+w_slice] = vesicle_slice
         
@@ -250,42 +270,30 @@ def define_threshold(user_choice, channel, size_side, image_dim, ves_coordinates
     vesicle_box_channel = zoom_in_vesicle(channel, size_side, image_dim, ves_coordinates)
     
     if user_choice == True:
+        fig, ax = try_all_threshold(vesicle_box_channel, figsize=(5, 10), verbose=False)             
         
-        fig, ax = try_all_threshold(vesicle_box_channel, figsize=(5, 10), verbose=False)
-        plt.show()                  
-
         threshold_method = input("Choose threshold method to follow:")
         
-        if threshold_method == 'Isodata':
-            threshold = threshold_isodata(vesicle_box_channel)
-        elif threshold_method == 'Li':
-            threshold = threshold_li(vesicle_box_channel)
-        elif threshold_method == 'Mean':
-            threshold = threshold_mean(vesicle_box_channel)
-        elif threshold_method == 'Minimum':
-            threshold = threshold_minimum(vesicle_box_channel)
-        elif threshold_method == 'Otsu':
-            threshold = threshold_otsu(vesicle_box_channel)
-        elif threshold_method == 'Triangle':
-            threshold = threshold_triangle(vesicle_box_channel)
-        elif threshold_method == 'Yen':
-            threshold = threshold_yen(vesicle_box_channel)
-        else:
-            print('Invalid method!')
+        methods = {'Isodata': threshold_isodata, 'Li': threshold_li, 'Mean': threshold_mean,
+                   'Minimum': threshold_minimum, 'Otsu': threshold_otsu, 
+                   'Triangle': threshold_triangle, 'Yen': threshold_yen}
+        
+        threshold = methods.get(threshold_method, threshold_li)(vesicle_box_channel)
     else:
         threshold = threshold_li(vesicle_box_channel)
         
     return threshold
 
 def refine_guv_center(image, center_guess, radius_estimate, search_box_factor=1.5):
+    """
+    Refines the center using gradients and Hough transform to handle nearby vesicles.
+    """
     xc, yc = center_guess
-    
-    # 1. Define ROI
     box_half_width = int(radius_estimate * search_box_factor)
-    x_start = int(max(0, xc - box_half_width))
-    x_end = int(min(image.shape[1], xc + box_half_width))
-    y_start = int(max(0, yc - box_half_width))
-    y_end = int(min(image.shape[0], yc + box_half_width))
+    
+    # 1. ROI Extraction
+    x_start, x_end = int(max(0, xc - box_half_width)), int(min(image.shape[1], xc + box_half_width))
+    y_start, y_end = int(max(0, yc - box_half_width)), int(min(image.shape[0], yc + box_half_width))
     
     if x_start >= x_end or y_start >= y_end: return center_guess
     
@@ -293,90 +301,66 @@ def refine_guv_center(image, center_guess, radius_estimate, search_box_factor=1.
     roi_center_x = xc - x_start
     roi_center_y = yc - y_start
     
-    # 2. Pre-processing (CLAHE + Blur)
     if roi.size == 0: return center_guess
+
+    # 2. Pre-processing
     roi_norm = cv2.normalize(roi, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8,8)) # Aggressive contrast
+    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8,8))
     roi_eq = clahe.apply(roi_norm)
     roi_smooth = cv2.GaussianBlur(roi_eq, (5, 5), 0)
 
-    # 3. Edge Detection (Canny)
+    # 3. Edges & Gradients
     edges = cv2.Canny(roi_smooth, 30, 100)
-    
-    # 4. Calculate Gradients (Sobel)
-    # We need this to check the DIRECTION of the edges
     gx = cv2.Sobel(roi_smooth, cv2.CV_64F, 1, 0, ksize=5)
     gy = cv2.Sobel(roi_smooth, cv2.CV_64F, 0, 1, ksize=5)
     
-    # 5. GRADIENT ORIENTATION FILTER (The Fix for Vesicle 4)
-    # Iterate through all edge pixels and check if they point to our center
+    # 4. Filter Edges by Orientation
     y_edge, x_edge = np.where(edges > 0)
-    
-    # Vector from estimated center to pixel
     rx = x_edge - roi_center_x
     ry = y_edge - roi_center_y
     r_norm = np.sqrt(rx**2 + ry**2)
-    r_norm[r_norm == 0] = 1 # Safety
+    r_norm[r_norm == 0] = 1
     
-    # Gradient vector at that pixel
     g_x_val = gx[y_edge, x_edge]
     g_y_val = gy[y_edge, x_edge]
     g_norm = np.sqrt(g_x_val**2 + g_y_val**2)
-    g_norm[g_norm == 0] = 1 # Safety
+    g_norm[g_norm == 0] = 1
     
-    # Dot Product: (Gradient) dot (Radius)
-    # If aligned, dot_product approx 1.0. If neighbor, it will be low or negative.
     dot_product = np.abs((g_x_val/g_norm) * (rx/r_norm) + (g_y_val/g_norm) * (ry/r_norm))
-    
-    # Keep only edges that are aligned with the radius (Tolerance > 0.6)
     valid_indices = dot_product > 0.6
     
-    # Reconstruct the "Cleaned" Edge Image
     clean_edges = np.zeros_like(edges)
     clean_edges[y_edge[valid_indices], x_edge[valid_indices]] = 255
     
-    # 6. Distance Masking (Tightened slightly)
+    # 5. Distance Masking
     h, w = roi.shape
     Y, X = np.ogrid[:h, :w]
     dist_from_guess = np.sqrt((X - roi_center_x)**2 + (Y - roi_center_y)**2)
-    
-    # Mask [0.75 * R to 1.25 * R] 
-    mask = (dist_from_guess > radius_estimate * 0.75) & \
-           (dist_from_guess < radius_estimate * 1.25)
+    mask = (dist_from_guess > radius_estimate * 0.75) & (dist_from_guess < radius_estimate * 1.25)
     clean_edges[~mask] = 0
     
     if np.sum(clean_edges) < 10: return center_guess
 
-    # 7. Circular Hough Transform
+    # 6. Hough Transform
     hough_radii = np.arange(int(radius_estimate * 0.8), int(radius_estimate * 1.2), 2)
-    
     if len(hough_radii) == 0: return center_guess
-    
-    # Perform Hough on CLEAN edges only
     hough_res = hough_circle(clean_edges, hough_radii)
-    
     accums, cx, cy, radii = hough_circle_peaks(hough_res, hough_radii, total_num_peaks=1)
     
     if len(cx) == 0: return center_guess
-    
-    xc_new = cx[0]
-    yc_new = cy[0]
-
-    return (x_start + xc_new, y_start + yc_new)
+    return (x_start + cx[0], y_start + cy[0])
     
 def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profiles):
     """
     Calculation of the multiple linear profiles for a single vesicle.
     """
     num_channels   = len(channels_data[0,0,:])
-    
     xc             = ves_coordinates[1]
     yc             = ves_coordinates[2]
     radius         = ves_coordinates[3]
     
     xc_refined, yc_refined = refine_guv_center(channels_data[:,:,0], (xc, yc), radius)
     
-    # Store refined coordinates in ves_coordinates for later use (plotting)
     ves_coordinates[1] = xc_refined
     ves_coordinates[2] = yc_refined
     
@@ -493,16 +477,10 @@ def plot_format(proteins_present):
     Pre-processing for choosing a plotting format appropriate for the number of
     channels present.
     """
-    if proteins_present[0] == True:
-        if proteins_present[1] == True:
-            protein_status = "both_proteins"
-        else: 
-            protein_status = "only_septin"
-    else:
-        if proteins_present[1] == True:
-            protein_status = "only_actin"
-    
-    return protein_status
+    if proteins_present[0] and proteins_present[1]: return "both_proteins"
+    if proteins_present[0]: return "only_septin"
+    if proteins_present[1]: return "only_actin"
+    return "unknown"
 
             
 def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
@@ -511,19 +489,22 @@ def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_
     """
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1,4,figsize=(13,4), dpi=125)
     fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', S:' +  str(round(background[0,1],3)) + ', A:' +  str(round(background[0,2],3)))
+    
     ax1.imshow(vesicle_box[:,:,0], cmap = "cmap_cyan")
     ax1.set_title('Membrane')
     ax1.set_axis_off()
+    
     ax2.imshow(vesicle_box[:,:,1] , cmap = "cmap_magenta_enhanced")
     ax2.set_title('Septin')
     ax2.set_axis_off()
+    
     ax3.imshow(vesicle_box[:,:,2] , cmap = "cmap_yellow")
     ax3.set_title('Actin')
     ax3.set_axis_off()
+    
     ax4.imshow(mask_memb_fill , cmap = "binary_r")
     ax4.set_title('Mask')
     ax4.set_axis_off()
-    plt.show()
     
     filename = f"Vesicle_{vesicle_id}_Channels_and_Mask.png"
     fig.savefig(os.path.join(path_to_output, filename))
@@ -535,18 +516,19 @@ def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, pat
    """
    fig, (ax1, ax2, ax3) = plt.subplots(1,3,figsize=(13,5), dpi=125)
    fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', S:' +  str(round(background[0,1],3)))
+   
    ax1.imshow(vesicle_box[:,:,0], cmap = "cmap_cyan")
    ax1.set_title('Membrane')
    ax1.set_axis_off()
+   
    ax2.imshow(vesicle_box[:,:,1] , cmap = "cmap_magenta_enhanced")
    ax2.set_title('Septin')
    ax2.set_axis_off()
+   
    ax3.imshow(mask_memb_fill , cmap = "binary_r")
    ax3.set_title('Mask')
    ax3.set_axis_off()
-   plt.show()
-
-   # Corrected: Removed doubled path injection
+   
    filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
    fig.savefig(os.path.join(path_to_output, filename))
 
@@ -557,18 +539,19 @@ def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, pa
    """
    fig, (ax1, ax2, ax3) = plt.subplots(1,3,figsize=(13,5), dpi=125)
    fig.suptitle('Vesicle ' + str(vesicle_id) + ' :  Background:   M:' +  str(round(background[0,0],3)) + ', A:' +  str(round(background[0,1],3))) 
+   
    ax1.imshow(vesicle_box[:,:,0], cmap = "cmap_cyan")
    ax1.set_title('Membrane')
    ax1.set_axis_off()
+   
    ax2.imshow(vesicle_box[:,:,1] , cmap = "cmap_yellow")
    ax2.set_title('Actin')
    ax2.set_axis_off()
+   
    ax3.imshow(mask_memb_fill , cmap = "binary_r")
    ax3.set_title('Mask')
    ax3.set_axis_off()
-   plt.show()
-  
-   # Corrected: Removed doubled path injection
+   
    filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
    fig.savefig(os.path.join(path_to_output, filename))
 
@@ -600,10 +583,11 @@ def radial_profile(num_channels, intensity_profiles):
 def membrane_detection(radial_profile_memb, radius):
     """
     Detection of the membrane inner and outer borders.
-    Updated to capture full membrane tails.
+    UPDATED: Returns 'peak_index' for refined radius calculation.
     """
     comment = []
     death_mark = False
+    peak_index = 0 # NEW
     
     # Find peaks
     peaks, properties = find_peaks(radial_profile_memb, 
@@ -612,9 +596,9 @@ def membrane_detection(radial_profile_memb, radius):
                                    prominence=np.max(radial_profile_memb) * 0.05)
     
     if not np.any(peaks):
-        return 0, 0, ["no_memb_peak"], True
+        return 0, 0, 0, ["no_memb_peak"], True # Return peak_index=0
     
-    # Peak Selection Logic (Same as before)
+    # Peak Selection Logic
     if len(peaks) == 1:
         chosen_peak = 0
     else:
@@ -626,21 +610,21 @@ def membrane_detection(radial_profile_memb, radius):
             peak_scores.append(score)
         chosen_peak = np.argmax(peak_scores)
     
-    # --- CHANGED SECTION START ---
+    peak_index = peaks[chosen_peak] # Capture peak index
+    
+
     try:
         # Measure width at 75% height (lower down the peak) to capture tails
         # Standard FWHM is 0.5; using 0.75 captures more of the base
         # Note: peak_widths returns (widths, width_heights, left_ips, right_ips)
-        width_results = peak_widths(radial_profile_memb, [peaks[chosen_peak]], rel_height=0.75)
+        width_results = peak_widths(radial_profile_memb, [peak_index], rel_height=0.75)
         
         # Get interpolated indices
-        left_idx = width_results[2][0]
-        right_idx = width_results[3][0]
+        left_idx, right_idx = width_results[2][0], width_results[3][0]
         
         # Add PADDING to ensure we don't cut off signal
         # This prevents "leaking" signal into the background calculation
         padding = 3  # pixels
-        
         index_border_in = int(np.floor(left_idx - padding))
         index_border_out = int(np.ceil(right_idx + padding))
         
@@ -652,13 +636,13 @@ def membrane_detection(radial_profile_memb, radius):
         index_border_in = max(0, peaks[chosen_peak] - 8)
         index_border_out = min(len(radial_profile_memb) - 1, peaks[chosen_peak] + 8)
         comment.append("width_calc_failed")
-    # --- CHANGED SECTION END ---
+
     
     # Quality checks
-    if index_border_out - index_border_in > radius/3: # Relaxed check for wider inclusion
+    if index_border_out - index_border_in > radius/3: 
         comment.append("wide_peak")
     
-    return index_border_in, index_border_out, comment, death_mark
+    return index_border_in, index_border_out, peak_index, comment, death_mark
 
 def check_membrane_quality(angular_profiles, radial_profiles, radius):
     """
@@ -675,12 +659,12 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
         cv_membrane = np.std(membrane_angular) / np.mean(membrane_angular)
         
         # Flag irregular membranes for review
-        if cv_membrane > 0.4:
-            comments.append("very_irregular_membrane")
-        elif cv_membrane > 0.3:
-            comments.append("irregular_membrane")
+        if np.mean(membrane_angular) > 0:
+            cv_membrane = np.std(membrane_angular) / np.mean(membrane_angular)
+            if cv_membrane > 0.4: comments.append("very_irregular_membrane")
+            elif cv_membrane > 0.3: comments.append("irregular_membrane")
     
-    # NEW CHECK 1: Look for sharp transitions
+    # CHECK 1: Look for sharp transitions
     if len(membrane_angular) > 10:
         # Calculate differences between adjacent points
         membrane_diff = np.abs(np.diff(membrane_angular))
@@ -691,7 +675,7 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
         if max_transition > mean_signal * 0.5:  # Transition > 50% of mean signal
             comments.append("sharp_membrane_transitions")
     
-    # NEW CHECK 2: Look for plateau-like behavior (flat regions)
+    # CHECK 2: Look for plateau-like behavior (flat regions)
     if len(membrane_angular) > 20:
         # Check for long flat regions
         rolling_std = []
@@ -708,7 +692,7 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
         if min_rolling_std < 5 and max_rolling_std > 15:
             comments.append("membrane_plateau_regions")
     
-    # NEW CHECK 3: Check for protein clustering that might affect localization
+    # CHECK 3: Check for protein clustering that might affect localization
     if angular_profiles.shape[1] > 1:  # If we have protein channels
         for protein_idx in range(1, angular_profiles.shape[1]):
             protein_angular = angular_profiles[:, protein_idx]
@@ -722,7 +706,7 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
                 elif protein_cv > 0.6:
                     comments.append("moderate_protein_clustering")
     
-    # NEW CHECK 4: Check for asymmetric membrane profiles
+    # CHECK 4: Check for asymmetric membrane profiles
     if len(membrane_angular) >= 180:  # Need enough points to check symmetry
         # Compare first half vs second half
         first_half = membrane_angular[:len(membrane_angular)//2]
@@ -762,24 +746,25 @@ def check_membrane_quality(angular_profiles, radial_profiles, radius):
     return comments
 
 
-def check_membrane_quality(angular_profiles, radial_profiles, radius):
-    comments = []
-    membrane_angular = angular_profiles[:,0]
-    
-    if np.mean(membrane_angular) > 0:
-        cv_membrane = np.std(membrane_angular) / np.mean(membrane_angular)
-        if cv_membrane > 0.4: comments.append("very_irregular_membrane")
-    
-    return comments
-
 def angular_profile(num_channels, intensity_profiles, index_border_in, index_border_out, pixels_to_remove):
     """
     Calculation of the angular profile along the membrane contour.
+    
+    UPDATED: Uses np.max instead of np.average. 
+    This prevents wide border detection from diluting the intensity signal,
+    ensuring localization is calculated based on peak protein density.
     """
+    # Initialize array with shape (num_angles, num_channels)
     angular_profiles = np.ones_like(intensity_profiles[0,:,:])
     
     for i in range(num_channels):
-        angular_profiles[:,i] = np.average(intensity_profiles[pixels_to_remove+index_border_in:pixels_to_remove+index_border_out,:,i], axis=0)
+        # Slice the radial profile to getting only the segment within the borders
+        # Shape of segment: (border_width, num_angles)
+        segment = intensity_profiles[pixels_to_remove+index_border_in : pixels_to_remove+index_border_out, :, i]
+        
+        # Calculate the MAXIMUM intensity found along the radius for this angle
+        # axis=0 collapses the radial dimension, leaving us with one value per angle
+        angular_profiles[:,i] = np.max(segment, axis=0)
     
     return angular_profiles
 
@@ -787,51 +772,83 @@ def angular_profile(num_channels, intensity_profiles, index_border_in, index_bor
 def localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, radius, size_central_area, pixels_to_remove):
     """
     Quantification of the protein localization on the membrane.
+    FIXED: Prevents divide-by-zero errors when median intensity is 0.
     """
     comment = []
-    
-    num_proteins   = num_channels - 1 
-    index_centre   = int(size_central_area * (radius-pixels_to_remove)) 
+    num_proteins = num_channels - 1 
+    index_centre = int(size_central_area * (radius-pixels_to_remove)) 
+    localization = np.zeros(num_proteins)
  
-    loc_numerator  = np.zeros(num_proteins)
-    loc_denominator = np.zeros(num_proteins)
-    localization   = np.zeros(num_proteins) 
-
     for i in range(num_proteins):
-        ## Calculation or relative standard deviation of angular protein signal:
-        rsd = np.std(angular_profiles[:,i+1])/np.mean(angular_profiles[:,i+1])
+        if np.mean(angular_profiles[:,i+1]) > 0:
+            rsd = np.std(angular_profiles[:,i+1]) / np.mean(angular_profiles[:,i+1])
+            if rsd > 0.8:
+                comment = ["high_rsd"]
         
-        if rsd > 0.8:
-            comment = ["high_rsd"]
-            
-        ## Median value of protein channel:
-        median  = np.median(angular_profiles[:,i+1])
-        centre  = np.average(radial_profiles[0:index_centre,i+1]) 
+        median = np.median(angular_profiles[:,i+1])
+        centre = np.average(radial_profiles[0:index_centre,i+1]) 
         
-        ## Localization definition:
-            
-        loc_numerator[i]   = median - centre
-        loc_denominator[i] = median
-        
-        localization[i]   = np.clip(loc_numerator[i]/loc_denominator[i],0,None)
+        # FIX: Check if median is valid to avoid RuntimeWarning: divide by zero
+        if median > 0.001:
+            localization[i] = np.clip((median - centre)/median, 0, None)
+        else:
+            localization[i] = 0.0 # No signal on membrane = No localization
     
     return localization, comment
+
+
+def analyze_actin_structure(radial_profiles, angular_profiles, localization_score, protein_channel_index, px_size=1.0):
+    """
+    Calculates actin cortex properties: Thickness (t_cortex), Density (rho_actin), Uniformity.
+    """
+    # Initialize defaults
+    t_cortex, rho_actin, uniformity = 0.0, 0.0, 0.0
+    
+    # Only calculate structural metrics if there is significant localization
+    # (e.g. if localization < 0.2, there is likely no cortex to measure)
+    if localization_score < 0.2: return t_cortex, rho_actin, uniformity
+    
+    # --- 1. Calculate Thickness (t_cortex) ---
+    actin_radial = radial_profiles[:, protein_channel_index]
+    
+    # Find peaks in the actin channel
+    peaks, properties = find_peaks(actin_radial, height=np.max(actin_radial)*0.5)
+    
+    if len(peaks) > 0:
+        # Calculate FWHM (rel_height=0.5)
+        # Unpack the tuple correctly so 'widths' is just the array of widths
+        widths, width_heights, left_ips, right_ips = peak_widths(actin_radial, peaks, rel_height=0.5)
+        
+        # Select the peak with the highest intensity (Tallest, not Widest)
+        tallest_peak_idx = np.argmax(actin_radial[peaks])
+        
+        # Now we can safely access the width of the tallest peak
+        t_cortex_px = widths[tallest_peak_idx]
+        
+        t_cortex = t_cortex_px * px_size
+    
+    # --- 2. Calculate Density (rho_actin) ---
+    actin_angular = angular_profiles[:, protein_channel_index]
+    rho_actin = np.mean(actin_angular)
+    
+    # --- 3. Calculate Uniformity (CV) ---
+    if rho_actin > 0:
+        stdev = np.std(actin_angular)
+        uniformity = stdev / rho_actin
+        
+    return t_cortex, rho_actin, uniformity
 
 
 def plot_debug_overlay(ves_coordinates, radius, index_border_in, index_border_out, 
                        image_dim, channels_data, along_radius, theta, 
                        final_output_path):
     """
-    Plots a debug image showing:
-    1. Radial spokes (every 10th line)
-    2. Detected Membrane borders (Inner/Outer)
-    3. Background region (box)
+    Plots a debug image showing radial spokes and borders.
     """
-    xc = ves_coordinates[1]
-    yc = ves_coordinates[2]
+    xc, yc = ves_coordinates[1], ves_coordinates[2]
     
     # Create zoom box
-    size_view = 2.0  # View 2x radius
+    size_view = 1.5  # View 1.5x radius
     membrane_channel = channels_data[:,:,0]
     vesicle_img = zoom_in_vesicle(membrane_channel, size_view, image_dim, ves_coordinates)
     
@@ -866,9 +883,10 @@ def plot_debug_overlay(ves_coordinates, radius, index_border_in, index_border_ou
     plt.close(fig)
 
 
-def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, path_to_output, exp_info):
+def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization, path_to_output, exp_info, pixel_size):
     """
     Optional plotting of the calculated intensity radial and angular profiles.
+    UPDATED: Now passes pixel_size to plotting functions.
     """
     if plot_intensity_profiles == True:
         
@@ -883,42 +901,49 @@ def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameter
         protein_status = plot_format(proteins_present)    
 
         if protein_status == "both_proteins":
-            plot_int_prof_both(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info)
+            plot_int_prof_both(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size)
     
         elif protein_status == "only_septin":
-            plot_int_prof_only_septin(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info)
+            plot_int_prof_only_septin(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size)
         
         elif protein_status == "only_actin":
-            plot_int_prof_only_actin(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info)
+            plot_int_prof_only_actin(int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2], along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size)
 
-
-def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
+def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size):
     """
     Plotting of the intensity radial and angular profiles (Both proteins).
+    UPDATED: Uses physical units (um) and visualizes FWHM.
     """
+    radius_um = along_radius * pixel_size
     
     ## Intensity radial profile:
-        
     fig, axes = plt.subplot_mosaic("AB;AC;AD;AE", width_ratios = [3, 1], dpi=125)
     axes["A"].set_title('Intensity radial profile of Vesicle ' + str(vesicle_id))
-    axes["A"].plot(along_radius, radial_profiles[:,0], c = 'cyan', label = 'membrane')
-    axes["A"].plot(along_radius, radial_profiles[:,1], c = 'magenta', label = 'septin')
-    axes["A"].plot(along_radius, radial_profiles[:,2], c = 'gold', label = 'actin')
-    axes["A"].axvline(x = along_radius[index_border_in], c = 'red', label = 'border in', ls="--")
-    axes["A"].axvline(x = along_radius[index_border_out], c = 'orange', label = 'border out', ls="--")
-    axes["A"].axvline(x = radius, c = 'black', label = 'detected radius', ls=":")
-    axes["A"].axvline(x = size_central_area*radius, c ='green', label = 'central area border')
-    axes["A"].set(xlabel = 'radius (px)', ylabel = 'I (a.u.)')
+    axes["A"].plot(radius_um, radial_profiles[:,0], c = 'cyan', label = 'membrane')
+    axes["A"].plot(radius_um, radial_profiles[:,1], c = 'magenta', label = 'septin')
+    axes["A"].plot(radius_um, radial_profiles[:,2], c = 'gold', label = 'actin')
+    
+    # Visualizing FWHM
+    actin_prof = radial_profiles[:, 2] 
+    peaks, _ = find_peaks(actin_prof, height=np.max(actin_prof)*0.5)
+    if len(peaks) > 0:
+        widths, width_heights, left_ips, right_ips = peak_widths(actin_prof, peaks, rel_height=0.5)
+        #idx = np.argmax(widths)
+        idx = np.argmax(actin_prof[peaks])
+        r_left_um = (along_radius[0] + left_ips[idx]) * pixel_size
+        r_right_um = (along_radius[0] + right_ips[idx]) * pixel_size
+        axes["A"].hlines(width_heights[idx], r_left_um, r_right_um, color='blue', lw=2, label='Actin FWHM')
+
+    axes["A"].axvline(x = along_radius[index_border_in]*pixel_size, c = 'red', label = 'border in', ls="--")
+    axes["A"].axvline(x = along_radius[index_border_out]*pixel_size, c = 'orange', label = 'border out', ls="--")
+    axes["A"].set_xlabel('radius (µm)')
+    axes["A"].set_ylabel('I (a.u.)')
     axes["A"].legend(loc="upper left", fontsize=8)
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Septin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
-    axes["C"].set_axis_off()
-    axes["D"].set_title("Actin channel", fontsize = 10, pad =-1)
-    axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow")
-    axes["D"].set_axis_off()
+    
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced"); axes["C"].set_axis_off()
+    axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow"); axes["D"].set_axis_off()
+    
     axes["E"].text(-0.2,0.7,"Background M:  " + str(round(background[0,0],4)), size = 10)
     axes["E"].text(-0.2,0.5,"Background S:   " + str(round(background[0,1],4)), size = 10)
     axes["E"].text(-0.2,0.3,"Background A:   " + str(round(background[0,2],4)), size = 10)
@@ -929,9 +954,7 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
     fig.savefig(os.path.join(path_to_output, filename))
     
-    
     ## Intensity angular profile:
-
     fig, axes = plt.subplot_mosaic("AB;AC;AD", width_ratios = [3, 1], dpi=125)
     axes["A"].set_title('Intensity angular profile of Vesicle ' + str(vesicle_id))
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,0], c = 'cyan', label = 'membrane')
@@ -939,124 +962,260 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,2], c = 'gold', label = 'actin')
     axes["A"].legend(loc="upper right")
     axes["A"].set(xlabel = '\u03B8 (deg)', ylabel = 'I (a.u.)')
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Septin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
-    axes["C"].set_axis_off()
-    axes["D"].set_title("Actin channel", fontsize = 10, pad =-1)
-    axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow")
-    axes["D"].set_axis_off()
     
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced"); axes["C"].set_axis_off()
+    axes["D"].imshow(image_box[:,:,2], cmap = "cmap_yellow"); axes["D"].set_axis_off()
     
     filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
     fig.savefig(os.path.join(path_to_output, filename))
+    plt.close()
 
     
-def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
+def plot_int_prof_only_septin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size):
     """
     Plotting of the intensity radial and angular profiles (Septin only).
     """
+    radius_um = along_radius * pixel_size
+
     ## Intensity radial profile:
-        
     fig, axes = plt.subplot_mosaic("AB;AC", width_ratios = [6, 2], dpi=125)
     axes["A"].set_title('Intensity radial profile of Vesicle ' + str(vesicle_id))
-    axes["A"].plot(along_radius[2:], radial_profiles[2:,0]/np.max(radial_profiles[2:,0]), c = 'cyan', label = 'Membrane channel')
-    axes["A"].plot(along_radius[2:], radial_profiles[2:,1]/np.max(radial_profiles[2:,1]), c = 'magenta', label = 'Septin channel')
-    axes["A"].set(xlabel = 'radius (px)', ylabel = 'normalized intensity (a.u.)')
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Septin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
-    axes["C"].set_axis_off()
+    axes["A"].plot(radius_um[2:], radial_profiles[2:,0]/np.max(radial_profiles[2:,0]), c = 'cyan', label = 'Membrane channel')
+    axes["A"].plot(radius_um[2:], radial_profiles[2:,1]/np.max(radial_profiles[2:,1]), c = 'magenta', label = 'Septin channel')
+    axes["A"].set_xlabel('radius (µm)')
+    axes["A"].set_ylabel('normalized intensity (a.u.)')
     
-    # Corrected: Removed doubled path injection   
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced"); axes["C"].set_axis_off()
+    
     filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
     fig.savefig(os.path.join(path_to_output, filename))
     
     ## Intensity angular profile:
-
     fig, axes = plt.subplot_mosaic("AB;AC", width_ratios = [6, 2], dpi=125)
     axes["A"].set_title('Intensity angular profile of Vesicle ' + str(vesicle_id))
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,0]/max(angular_profiles[:,0]), c = 'cyan', label = 'Membrane channel')
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,1]/max(angular_profiles[:,1]), c = 'magenta', label = 'Septin channel')
     axes["A"].legend(loc="upper right", fontsize=10)
     axes["A"].set(xlabel = '\u03B8 (deg)', ylabel = 'normalized intensity (a.u.)')
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Septin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced")
-    axes["C"].set_axis_off()
     
-    # Corrected: Removed doubled path injection
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_magenta_enhanced"); axes["C"].set_axis_off()
+    
     filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
     fig.savefig(os.path.join(path_to_output, filename))
+    plt.close()
         
     
-def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info):
+def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, image_box, background, localization, path_to_output, exp_info, pixel_size):
     """
     Plotting of the intensity radial and angular profiles (Actin only).
     """
+    radius_um = along_radius * pixel_size
+    
     ## Intensity radial profile:
-        
     fig, axes = plt.subplot_mosaic("AB;AC;AD", width_ratios = [3, 1], dpi=125)
     axes["A"].set_title('Intensity radial profile of Vesicle ' + str(vesicle_id))
-    axes["A"].plot(along_radius, radial_profiles[:,0], c = 'cyan', label = 'membrane')
-    axes["A"].plot(along_radius, radial_profiles[:,1], c = 'gold', label = 'actin')
-    axes["A"].axvline(x = along_radius[index_border_in], c = 'red', label = 'border in', ls="--")
-    axes["A"].axvline(x = along_radius[index_border_out], c = 'orange', label = 'border out', ls="--")
-    axes["A"].axvline(x = radius, c = 'black', label = 'detected radius', ls=":")
-    axes["A"].axvline(x = size_central_area*radius, c ='green', label = 'central area border')
-    axes["A"].set(xlabel = 'radius (px)', ylabel = 'I (a.u.)')
+    axes["A"].plot(radius_um, radial_profiles[:,0], c = 'cyan', label = 'membrane')
+    axes["A"].plot(radius_um, radial_profiles[:,1], c = 'gold', label = 'actin')
+    
+    actin_prof = radial_profiles[:, 1] 
+    peaks, _ = find_peaks(actin_prof, height=np.max(actin_prof)*0.5)
+    if len(peaks) > 0:
+        widths, width_heights, left_ips, right_ips = peak_widths(actin_prof, peaks, rel_height=0.5)
+        #idx = np.argmax(widths)
+        idx = np.argmax(actin_prof[peaks])
+        r_left_um = (along_radius[0] + left_ips[idx]) * pixel_size
+        r_right_um = (along_radius[0] + right_ips[idx]) * pixel_size
+        axes["A"].hlines(width_heights[idx], r_left_um, r_right_um, color='blue', lw=2, label='Actin FWHM')
+
+    axes["A"].axvline(x = along_radius[index_border_in]*pixel_size, c = 'red', label = 'border in', ls="--")
+    axes["A"].axvline(x = along_radius[index_border_out]*pixel_size, c = 'orange', label = 'border out', ls="--")
+    axes["A"].set_xlabel('radius (µm)')
+    axes["A"].set_ylabel('I (a.u.)')
     axes["A"].legend(loc="upper left", fontsize=8)
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Actin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow")
-    axes["C"].set_axis_off()
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow"); axes["C"].set_axis_off()
     axes["D"].text(-0.2,0.7,"Background M:  " + str(round(background[0,0],4)), size = 10)
     axes["D"].text(-0.2,0.5,"Background A:   " + str(round(background[0,1],4)), size = 10)
     axes["D"].text(-0.2,0.0,"Localization A :  " + str(round(localization[0],3)), size = 10)
     axes["D"].set_axis_off()
     
-    # Corrected: Removed doubled path injection
     filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
     fig.savefig(os.path.join(path_to_output, filename))
     
     ## Intensity angular profile:
-        
     fig, axes = plt.subplot_mosaic("AB;AC", width_ratios = [3, 1], dpi=125)
     axes["A"].set_title('Intensity angular profile of Vesicle ' + str(vesicle_id))
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,0], c = 'cyan', label = 'membrane')
     axes["A"].plot(theta*180/np.pi, angular_profiles[:,1], c = 'gold', label = 'actin')
     axes["A"].legend(loc="upper left")
     axes["A"].set(xlabel = '\u03B8 (deg)', ylabel = 'I (a.u.)')
-    axes["B"].set_title("Membrane channel", fontsize = 10, pad =-1)
-    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan")
-    axes["B"].set_axis_off()
-    axes["C"].set_title("Actin channel", fontsize = 10, pad =-1)
-    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow")
-    axes["C"].set_axis_off()
+    axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
+    axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow"); axes["C"].set_axis_off()
 
-    # Corrected: Removed doubled path injection
     filename = f"Vesicle_{vesicle_id}-Int_prof_Angular.png"
     fig.savefig(os.path.join(path_to_output, filename))
+    plt.close()
 
-def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, comment):
+def plot_size_distribution(refined_radii_um, path_to_output):
     """
-    Adds all relevant information for a single vesicle in a row of the output file.
+    NEW: Plots a histogram of the refined vesicle radii in microns.
+    """
+    if len(refined_radii_um) == 0:
+        return
+
+    plt.figure(figsize=(6, 4), dpi=125)
+    plt.hist(refined_radii_um, bins=10, color='gray', edgecolor='black', alpha=0.7)
+    plt.title(f"Size Distribution (N={len(refined_radii_um)})")
+    plt.xlabel("Refined Radius (µm)")
+    plt.ylabel("Count")
+    plt.grid(axis='y', alpha=0.3)
+    
+    plt.savefig(os.path.join(path_to_output, "Size_Distribution_Refined.png"))
+    plt.close()
+
+def format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment):
+    """
+    Prepares the data row for the CSV file.
+    Does NOT write to file.
     """
     list_exp_info        = list(exp_info[:-1])
     list_ves_coordinates = list(ves_coordinates)
     list_background      = list(background[0,:])
     list_localization    = list(localization)
 
-    vesicle_row = list_exp_info +  list_ves_coordinates + list_background + list_localization + comment 
-    
+    # Create list of structure metrics (Handle if None)
+    if t_cortex is not None:
+        list_structure = [round(float(t_cortex), 3), round(float(rho_actin), 3), round(float(uniformity), 3)]
+    else:
+        list_structure = [] 
+        
+    # Handle refined radius
+    radius_val = [round(float(refined_radius_um), 3)] if refined_radius_um else [0]
+
+    vesicle_row = list_exp_info + list_ves_coordinates + list_background + list_localization + list_structure + radius_val + comment
+    return vesicle_row
+
+def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment):
+    """
+    Original function maintained for backward compatibility.
+    Calls format_result_row then writes to file immediately.
+    """
+    row = format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment)
     with open(os.path.join(final_output_path, "Analysis_Results.csv"), "a", newline='') as output_file:
         writer = csv.writer(output_file)
-        writer.writerow(vesicle_row)
+        writer.writerow(row)
+
+import warnings # Add this import at the top of skeleton.py if not present
+
+def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters_profiles, 
+                           proteins_present, size_mask, threshold_membrane, final_output_path, 
+                           exp_info, parameters_sizes, plot_int_profiles, plot_mask, pixel_size):
+    """
+    Runs the entire analysis pipeline for a single vesicle.
+    Designed for parallel processing. Returns the result row instead of writing it.
+    """
+    # Suppress peak warnings and register colormaps
+    warnings.filterwarnings("ignore", category=UserWarning) 
+    # specific warning from scipy signal
+    warnings.filterwarnings("ignore", message="some peaks have a width of 0")
+    color_maps()
+    
+    num_channels = channels_data.shape[2]
+    comment = []
+    
+    # 1. Linear profiles
+    intensity_profiles, along_radius, theta, death_mark = linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profiles)
+    
+    if death_mark:
+        background = np.zeros((1, num_channels))
+        localization_val = np.zeros(num_channels-1)
+        comment = ["margins"]
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, 0, comment)
+        return row, None
+
+    # 2. Background
+    background = background_noise(plot_mask, channels_data, proteins_present, size_mask, image_dim, ves_coordinates, threshold_membrane, final_output_path, exp_info)
+    intensity_profiles_corrected = background_correction(num_channels, intensity_profiles, background)
+    
+    # 3. Radial Profile
+    radial_profiles = radial_profile(num_channels, intensity_profiles_corrected)
+    pixels_to_remove = 2
+    radial_profiles = radial_profiles[pixels_to_remove:,:]
+    along_radius = along_radius[pixels_to_remove:]
+    
+    # 4. Membrane Detection
+    index_border_in, index_border_out, peak_index, comment_peak, death_mark_peak = membrane_detection(radial_profiles[:,0], ves_coordinates[3])
+    
+    if comment_peak: comment += comment_peak
+    
+    refined_radius_px = along_radius[peak_index]
+    refined_radius_um = refined_radius_px * pixel_size
+    
+    # Debug Plot 
+    plot_debug_overlay(ves_coordinates, ves_coordinates[3], index_border_in, index_border_out, image_dim, channels_data, along_radius, theta, final_output_path)
+    
+    if death_mark_peak:
+         background = np.zeros((1, num_channels))
+         localization_val = np.zeros(num_channels-1)
+         comment = comment_peak
+         row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, refined_radius_um, comment)
+         plt.close('all') # Cleanup
+         return row, refined_radius_um
+
+    # Low signal check
+    for j in range(num_channels-1):
+        if max(radial_profiles[:index_border_out, j+1]) <= 5:
+            comment.append("low_protein")
+            
+    # 5. Angular Profile
+    angular_profiles = angular_profile(num_channels, intensity_profiles_corrected, index_border_in, index_border_out, pixels_to_remove)
+    
+    # Quality Check
+    quality_comments = check_membrane_quality(angular_profiles, radial_profiles, ves_coordinates[3])
+    if quality_comments: comment += quality_comments
+    
+    if index_border_in == index_border_out:
+        comment.append("no_memb_detected")
+        comment_str = [', '.join(comment)]
+        background = np.zeros((1, num_channels))
+        localization_val = np.zeros(num_channels-1)
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, refined_radius_um, comment_str)
+        plt.close('all') # Cleanup
+        return row, refined_radius_um
+
+    # 6. Localization
+    size_central_area = parameters_sizes[2] 
+    localization_val, comment_loc = localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, ves_coordinates[3], size_central_area, pixels_to_remove)
+    
+    # 7. Actin Structure
+    actin_idx = num_channels - 1
+    loc_actin_score = localization_val[-1]
+    t_cortex, rho_actin, uniformity = analyze_actin_structure(radial_profiles, angular_profiles, loc_actin_score, actin_idx, pixel_size)
+    
+    # --- FILTER EMPTY VESICLES ---
+    # If density is ~0.5 - 1.0 (we use < 2.0 to be safe), flag as empty
+    if rho_actin < 2.0:
+        comment.append("empty_vesicle")
+        # Optional: Set localization to 0 if it's just noise
+        localization_val[-1] = 0.0
+    # ----------------------------------
+
+    # Final comments
+    if np.isnan(localization_val).any(): comment.append("no_memb_detected")
+    elif np.isinf(localization_val).any(): comment.append("zero_at_centre")
+    if comment_loc: comment += comment_loc
+    
+    # Plotting
+    plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization_val, final_output_path, exp_info, pixel_size)
+    
+    # FIX: Force close all figures created in this thread to prevent memory warning
+    plt.close('all')
+
+    # Format Row
+    comment_final = [', '.join(comment)] if comment else ["OK"]
+    row = format_result_row(exp_info, ves_coordinates, background, localization_val, t_cortex, rho_actin, uniformity, refined_radius_um, comment_final)
+    
+    return row, refined_radius_um
