@@ -104,3 +104,54 @@ def plot_phenotype_composition(data, category_col, phenotype_col, output_dir, fi
     fig.savefig(path, bbox_inches='tight')
     plt.close(fig)
     print(f"  -> Plot saved: {filename}")
+    
+    
+def plot_violin_comparison(data, x_col, y_col, title, ylabel, output_dir, filename):
+    """Generates a Violin plot to show density distribution."""
+    plt.figure(figsize=(10, 6), dpi=125)
+    
+    # Inner='quartile' draws dashed lines for median and quartiles
+    # Set hue=x_col and legend=False to fix the warning
+    sns.violinplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, palette="Set2", inner="quartile", alpha=0.6)
+    
+    # Optional: Add strip plot on top for individual points (if data isn't too huge)
+    sns.stripplot(data=data, x=x_col, y=y_col, color='black', size=2, alpha=0.3, jitter=True)
+    
+    plt.title(title, fontsize=14)
+    plt.ylabel(ylabel, fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y', alpha=0.3)
+    
+    save_plot(filename, output_dir)
+    
+
+def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir=None, filename=None, ax=None):
+    """
+    Generates a boxplot comparing a numerical variable across categories.
+    Can draw on an existing axis 'ax' if provided, or create a new figure.
+    """
+    # Determine if we are drawing on an existing subplot or creating a new one
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        is_standalone = True
+    else:
+        # We are drawing onto an existing subplot passed from outside
+        is_standalone = False
+
+    # Create Boxplot on the specified axis
+    # Added 'hue' to avoid future warning, set legend=False
+    sns.boxplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, ax=ax, palette='Set2')
+    
+    # Overlay strip plot for individual data points (optional, but nice)
+    sns.stripplot(data=data, x=x_col, y=y_col, color='black', alpha=0.3, jitter=True, ax=ax)
+
+    # Customize the specific axis
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_xlabel(x_col, fontsize=12)
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Only save automatically if it's a standalone plot AND filename is provided
+    if is_standalone and filename and output_dir:
+         save_plot(filename, output_dir)

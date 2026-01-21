@@ -8,6 +8,7 @@ import os
 import file_handling
 import analysis_size
 import analysis_phenotype
+import analysis_statistics
 import plotting
 
 # ---------------- CONFIGURATION ----------------
@@ -40,6 +41,9 @@ def main():
         
         # C. Batch-to-Batch Comparison (Drill down)
         #analysis_phenotype.run_batch_comparison(df, results_dir)
+        
+        # D. Statistical Analysis
+        analysis_statistics.run_statistics(df, results_dir)
         
         print("\n--- Pipeline Finished Successfully ---")
 
