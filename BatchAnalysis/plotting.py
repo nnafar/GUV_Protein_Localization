@@ -36,29 +36,29 @@ def plot_histogram(data, column, title, xlabel, output_dir, filename, color='tea
     
     save_plot(filename, output_dir)
 
-def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir, filename, hue=None):
-    """Generates a Boxplot with Strip (jitter) points overlay."""
-    plt.figure(figsize=(10, 6), dpi=125)
+# def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir, filename, hue=None):
+#     """Generates a Boxplot with Strip (jitter) points overlay."""
+#     plt.figure(figsize=(10, 6), dpi=125)
     
-    # Assign 'x' to 'hue' if no specific hue is provided to satisfy FutureWarnings
-    plot_hue = hue if hue is not None else x_col
+#     # Assign 'x' to 'hue' if no specific hue is provided to satisfy FutureWarnings
+#     plot_hue = hue if hue is not None else x_col
     
-    # Plot Boxplot (legend=False prevents duplicate legend entries)
-    sns.boxplot(data=data, x=x_col, y=y_col, hue=plot_hue, palette="Set2", showfliers=False, legend=False)
+#     # Plot Boxplot (legend=False prevents duplicate legend entries)
+#     sns.boxplot(data=data, x=x_col, y=y_col, hue=plot_hue, palette="Set2", showfliers=False, legend=False)
     
-    # Plot Strip points (jitter)
-    sns.stripplot(data=data, x=x_col, y=y_col, hue=hue, color='black', size=3, alpha=0.4, dodge=True)
+#     # Plot Strip points (jitter)
+#     sns.stripplot(data=data, x=x_col, y=y_col, hue=hue, color='black', size=3, alpha=0.4, dodge=True)
     
-    plt.title(title, fontsize=14)
-    plt.ylabel(ylabel, fontsize=12)
-    plt.xticks(rotation=45, ha='right')
-    plt.grid(axis='y', alpha=0.3)
+#     plt.title(title, fontsize=14)
+#     plt.ylabel(ylabel, fontsize=12)
+#     plt.xticks(rotation=45, ha='right')
+#     plt.grid(axis='y', alpha=0.3)
     
-    # Clean up legend if stripplot added one
-    if plt.gca().get_legend():
-        plt.gca().get_legend().remove()
+#     # Clean up legend if stripplot added one
+#     if plt.gca().get_legend():
+#         plt.gca().get_legend().remove()
     
-    save_plot(filename, output_dir)
+#     save_plot(filename, output_dir)
 
 def plot_scatter(data, x_col, y_col, hue_col, title, xlabel, ylabel, output_dir, filename):
     """Generates a Scatter plot colored by category."""

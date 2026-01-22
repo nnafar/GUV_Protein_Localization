@@ -14,7 +14,7 @@ import plotting
 # ---------------- CONFIGURATION ----------------
 # Use raw string (r"...") for Windows paths to avoid escape character issues
 ROOT_PATH = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
-CATEGORIES = ['BranchedCortex', 'LinearCortex', 'Empty', 'Actin']
+CATEGORIES = ['BranchedCortex'] # , 'LinearCortex', 'Empty', 'Actin'
 # -----------------------------------------------
 
 def main():

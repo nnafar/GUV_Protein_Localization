@@ -7,43 +7,62 @@ import seaborn as sns
 from scipy.stats import mannwhitneyu 
 import plotting
 
-# ----------------- PHYSICAL THRESHOLDS -----------------
-NO_LOC_LIMIT = 0.40         # Below this is strictly No Localization
-CORTEX_LOC_MIN = 0.60       # 
-CORTEX_THICKNESS_MIN = 0.80 # Above this is the 'Dense/Thin' cortex
-RHO_LIMIT = 2.0             # Baseline for completely empty signal
-UNIFORMITY_MIN = 0.4
-# -------------------------------------------------------
-
 def categorize_vesicles(df):
     """Classifies vesicles based on the decision tree."""
+    
+    # Threshold Constants
+    NO_LOC_LIMIT = 0.4          # Below this is Empty/Lumenal
+    FUZZY_LOC_LIMIT = 0.5       # Below this (but >0.4) is Fuzzy
+    PATCHY_LOC_LIMIT = 0.65     # Below this (but >0.5) is Patchy
+    
+    RHO_LIMIT = 8               # Distinguishes Empty vs Lumenal Actin
+    THICKNESS_LIMIT = 0.8       # Used to exclude out-of-focus Fuzzy vesicles
+    UNIFORMITY_LIMIT = 0.4      # New check: separates true Uniform from Patchy
+    
     def classify(row):
         loc = row['A localization']
         rho = row['rho_actin']
         thick = row['t_cortex']
-        cv = row['uniformity'] 
+        cv = row['uniformity']
         
+        # 1. Base Exclusion
         if pd.isna(loc) or pd.isna(rho) or pd.isna(thick):
             return "Excluded"
-
+        
+        # 2. Low Localization Branch (loc < 0.4)
         if loc < NO_LOC_LIMIT:
             if rho < RHO_LIMIT: return "Empty"
             else: return "Lumenal Actin"
             
-        if thick >= CORTEX_THICKNESS_MIN:
-            if loc < CORTEX_LOC_MIN: return "Fuzzy"
-            else: return "Thick and uniform"
+        # 3. Fuzzy Branch (0.4 <= loc < 0.5)
+        if loc < FUZZY_LOC_LIMIT:
+            # EXCLUSION RULE: If fuzzy AND thick (>0.8), it's out-of-focus -> Exclude
+            if thick > THICKNESS_LIMIT:
+                return "Excluded"
+            else:
+                return "Fuzzy"
+            
+        # 4. Cortex Branch (loc >= 0.5)
+        
+        # A. Mid Localization (0.5 - 0.65) -> Always Patchy
+        if loc < PATCHY_LOC_LIMIT:
+            return "Patchy"
+            
+        # B. High Localization (> 0.65) -> Check Uniformity
         else:
-            if pd.isna(cv): return "Unclassified Thin"
-            if cv >= UNIFORMITY_MIN: return "Thin and patchy"
-            else: return "Thin and uniform"
+            if pd.isna(cv): return "Patchy" # Fallback if cv is missing
+            
+            if cv < UNIFORMITY_LIMIT:
+                return "Uniform"
+            else:
+                return "Patchy" # High loc, but not uniform enough
 
     df['Phenotype_Category'] = df.apply(classify, axis=1)
     return df
 
 def save_phenotype_statistics(df, output_dir):
     """Calculates summary stats for phenotypes."""
-    print("     -> Calculating Phenotype Statistics...")
+    print("      -> Calculating Phenotype Statistics...")
     clean_df = df[df['Phenotype_Category'] != 'Excluded'].copy()
     target_cols = ['A localization', 't_cortex', 'rho_actin', 'uniformity']
     stats = clean_df.groupby('Phenotype_Category')[target_cols].agg(['mean', 'std', 'sem', 'count'])
@@ -55,7 +74,6 @@ def save_phenotype_statistics(df, output_dir):
 def add_stat_annotation(ax, df, x_col, y_col, group1, group2, order, level=0):
     """
     Draws a bracket and significance stars.
-    level: 0 = standard low bracket. 1, 2, 3... = stacked higher brackets.
     """
     # 1. Get Data for the specific pair
     data1 = df[df[x_col] == group1][y_col].dropna()
@@ -76,23 +94,17 @@ def add_stat_annotation(ax, df, x_col, y_col, group1, group2, order, level=0):
         x2 = order.index(group2)
     except ValueError: return 
     
-    # 4. Determine Height (Robust)
-    # Find the indices spanned by the bracket (from min(x1,x2) to max(x1,x2))
+    # 4. Determine Height
     start, end = min(x1, x2), max(x1, x2)
-    
-    # Identify which categories are sitting 'under' this bracket
     categories_under_bracket = [order[i] for i in range(start, end+1)]
     
-    # Find the maximum Y-value among ALL these categories to avoid cutting through data
     subset = df[df[x_col].isin(categories_under_bracket)][y_col]
     if subset.empty: y_max = 0
     else: y_max = subset.max()
     
-    # Calculate spacing based on data range
     y_range = df[y_col].max() - df[y_col].min()
     if y_range == 0: y_range = 1
     
-    # Stack height: Base + (Level * Step)
     base_clearance = y_range * 0.05
     step = y_range * 0.10
     
@@ -105,11 +117,12 @@ def add_stat_annotation(ax, df, x_col, y_col, group1, group2, order, level=0):
 
 def generate_phenotype_panel(df, output_dir):
     """Creates 2x2 Panel with STACKED statistical brackets."""
-    print("     -> Creating 2x2 Phenotype Panel (with stacked stats)...")
+    print("      -> Creating 2x2 Phenotype Panel (with stacked stats)...")
     
     plot_df = df[df['Phenotype_Category'] != 'Excluded'].copy()
     
-    order = ["Thin and patchy", "Thin and uniform", "Fuzzy", "Thick and uniform", "Lumenal Actin", "Empty"]
+    # UPDATE: Removed "Lumen-extended" from order
+    order = ["Patchy", "Uniform", "Fuzzy", "Lumenal Actin", "Empty"]
     existing_order = [c for c in order if c in plot_df['Phenotype_Category'].unique()]
     
     params = [
@@ -130,19 +143,22 @@ def generate_phenotype_panel(df, output_dir):
                 order=existing_order, legend=False, ax=ax, palette='tab10', showfliers=True 
             )
             
-            # --- LEVEL 0: Local Comparisons ---
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Thin and patchy", "Thin and uniform", existing_order, level=0)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Fuzzy", "Thick and uniform", existing_order, level=0)
+            # 1. Compare the two main cortex types
+            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
+                              "Patchy", "Uniform", existing_order, level=0)
             
-            # --- LEVEL 1: Cross-Group Comparison (The Bridge) ---
-            # Compares the two "Successful/Stable" states
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Thin and uniform", "Thick and uniform", existing_order, level=1)
-
+            # 2. Compare Transition (Fuzzy) vs Stable (Uniform)
+            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
+                              "Fuzzy", "Uniform", existing_order, level=1)
+            
+            # 3. NEW: Compare Fuzzy vs Patchy (Level 2 - High/Spanning)
+            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
+                              "Fuzzy", "Patchy", existing_order, level=2)
+            
             ax.set_title(title, fontsize=14)
             ax.set_xlabel('Phenotype', fontsize=11)
             ax.set_ylabel(col, fontsize=11)
             ax.tick_params(axis='x', rotation=45) 
-            # Increase top margin significantly to fit the stacked brackets
             ax.set_ylim(top=ax.get_ylim()[1] * 1.25) 
             ax.grid(axis='y', linestyle='--', alpha=0.5)
         else:
@@ -153,7 +169,11 @@ def generate_phenotype_panel(df, output_dir):
 
 def plot_5d_scatter(df, output_dir):
     """Generates 5D Scatter Plot."""
-    print("     -> Creating 5D Spatial Map...")
+    print("      -> Creating 5D Spatial Map...")
+    # Safety: Rename radius if needed
+    if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
+        df['Refined Radius (um)'] = df['radius']
+        
     plot_df = df[df['t_cortex'] > 0.05].copy()
     if plot_df.empty: return
 
@@ -172,7 +192,7 @@ def plot_5d_scatter(df, output_dir):
 
 def plot_pairgrid(df, output_dir):
     """Generates Pair Grid."""
-    print("     -> Creating Correlation Matrix...")
+    print("      -> Creating Correlation Matrix...")
     cols = ['t_cortex', 'rho_actin', 'A localization', 'uniformity', 'Phenotype_Category']
     plot_df = df[df['t_cortex'] > 0.05][cols].copy()
     if plot_df.empty: return
@@ -182,7 +202,6 @@ def plot_pairgrid(df, output_dir):
     path = os.path.join(output_dir, "Correlation_Matrix_PairPlot.png")
     g.savefig(path, bbox_inches='tight')
     plt.close()
-    print(f"  -> Plot saved: Correlation_Matrix_PairPlot.png")
 
 def run_phenotype_analysis(df, output_dir):
     """Main runner."""

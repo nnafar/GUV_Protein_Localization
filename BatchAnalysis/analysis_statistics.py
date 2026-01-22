@@ -85,11 +85,14 @@ def run_statistics(df, output_dir):
         # Experimental
         ('Category', 'BranchedCortex', 'LinearCortex'),
         
-        # Phenotypic - Structure
-        ('Phenotype_Category', 'Fuzzy', 'Thick and uniform'),
+        # Phenotypic - Transition vs Stable
+        ('Phenotype_Category', 'Fuzzy', 'Uniform'),
         
-        # Phenotypic - Stability
-        ('Phenotype_Category', 'Thin and patchy', 'Thin and uniform')
+        # Phenotypic - Stability (Patchy vs Uniform)
+        ('Phenotype_Category', 'Patchy', 'Uniform'),
+
+        # NEW: Phenotypic - Transition vs Formed Patchy
+        ('Phenotype_Category', 'Fuzzy', 'Patchy')
     ]
     
     metrics = ['t_cortex', 'rho_actin', 'A localization', 'uniformity']
@@ -100,7 +103,7 @@ def run_statistics(df, output_dir):
             print(f"  -> Testing {g1} vs {g2}...")
             for metric in metrics:
                 # Skip uniformity if not relevant (e.g. for Fuzzy vs Thick)
-                if metric == 'uniformity' and 'Thick' in g1: continue 
+                #if metric == 'uniformity' and 'Thick' in g1: continue 
                 
                 res = perform_mann_whitney(cortex_df, col, metric, g1, g2)
                 if res: results.append(res)
