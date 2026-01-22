@@ -121,7 +121,7 @@ def generate_phenotype_panel(df, output_dir):
     
     plot_df = df[df['Phenotype_Category'] != 'Excluded'].copy()
     
-    # UPDATE: Removed "Lumen-extended" from order
+    # Order: Patchy -> Uniform -> Fuzzy
     order = ["Patchy", "Uniform", "Fuzzy", "Lumenal Actin", "Empty"]
     existing_order = [c for c in order if c in plot_df['Phenotype_Category'].unique()]
     
@@ -143,15 +143,15 @@ def generate_phenotype_panel(df, output_dir):
                 order=existing_order, legend=False, ax=ax, palette='tab10', showfliers=True 
             )
             
-            # 1. Compare the two main cortex types
+            # 1. Compare Patchy vs Uniform (Level 0 - Low)
             add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
                               "Patchy", "Uniform", existing_order, level=0)
             
-            # 2. Compare Transition (Fuzzy) vs Stable (Uniform)
+            # 2. Compare Uniform vs Fuzzy (Level 1 - Medium)
             add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
                               "Fuzzy", "Uniform", existing_order, level=1)
             
-            # 3. NEW: Compare Fuzzy vs Patchy (Level 2 - High/Spanning)
+            # 3. Compare Fuzzy vs Patchy (Level 2 - High/Spanning)
             add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, 
                               "Fuzzy", "Patchy", existing_order, level=2)
             
@@ -168,26 +168,53 @@ def generate_phenotype_panel(df, output_dir):
     plotting.save_plot("Phenotype_Characteristics_Panel_2x2.png", output_dir)
 
 def plot_5d_scatter(df, output_dir):
-    """Generates 5D Scatter Plot."""
-    print("      -> Creating 5D Spatial Map...")
+    """
+    Generates 5D Scatter Plot.
+    (X, Y) = (Localization, Uniformity)
+    (Color, Size, Shape) = Density (rho_actin), Size = Radius, Shape = Phenotype
+    """
+    print("      -> Creating 5D Spatial Map (Loc vs Uniformity)...")
+    
     # Safety: Rename radius if needed
     if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
         df['Refined Radius (um)'] = df['radius']
         
+    # Filter for valid cortex data (exclude very thin noise or errors)
     plot_df = df[df['t_cortex'] > 0.05].copy()
+    
     if plot_df.empty: return
 
     plt.figure(figsize=(12, 9), dpi=125)
+    
+    # 1. Plot the Scatter
+    # X=Localization, Y=Uniformity
     sns.scatterplot(
-        data=plot_df, x='t_cortex', y='rho_actin', hue='A localization', 
-        size='Refined Radius (um)', style='Phenotype_Category',
-        sizes=(30, 400), palette='viridis', alpha=0.75, edgecolor='black'
+        data=plot_df, 
+        x='A localization', 
+        y='uniformity', 
+        hue='rho_actin',              # Color = Density
+        size='Refined Radius (um)',   # Size = Radius
+        style='Phenotype_Category',   # Shape = Phenotype
+        sizes=(30, 400), 
+        palette='viridis', 
+        alpha=0.8, 
+        edgecolor='black'
     )
-    plt.title('5D Cortex Map: Thickness vs Density\n(Color=Loc, Size=Radius, Shape=Phenotype)', fontsize=15)
-    plt.xlabel('Cortex Thickness (µm)', fontsize=12)
-    plt.ylabel('Actin Density (a.u.)', fontsize=12)
-    plt.grid(True, linestyle='--', alpha=0.4)
+
+    # 2. Labels and Formatting
+    plt.title('5D Phenotype Map', fontsize=15)
+    plt.xlabel('Localization', fontsize=12)
+    plt.ylabel('Uniformity', fontsize=12)
+    
+    plt.grid(True, linestyle='--', alpha=0.3)
+    
+    # Move legend outside
     plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, title="Properties")
+    
+    # Set Limits (Standard 0-1 range roughly)
+    plt.xlim(left=0, right=1.05)
+    plt.ylim(bottom=0)
+    
     plotting.save_plot("Cortex_5D_Bubble_Map.png", output_dir)
 
 def plot_pairgrid(df, output_dir):
@@ -202,6 +229,7 @@ def plot_pairgrid(df, output_dir):
     path = os.path.join(output_dir, "Correlation_Matrix_PairPlot.png")
     g.savefig(path, bbox_inches='tight')
     plt.close()
+
 
 def run_phenotype_analysis(df, output_dir):
     """Main runner."""
