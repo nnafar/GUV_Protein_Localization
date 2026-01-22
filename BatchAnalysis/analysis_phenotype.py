@@ -167,55 +167,61 @@ def generate_phenotype_panel(df, output_dir):
     plt.tight_layout()
     plotting.save_plot("Phenotype_Characteristics_Panel_2x2.png", output_dir)
 
-def plot_5d_scatter(df, output_dir):
+
+def plot_faceted_5d_map(df, output_dir):
     """
-    Generates 5D Scatter Plot.
-    (X, Y) = (Localization, Uniformity)
-    (Color, Size, Shape) = Density (rho_actin), Size = Radius, Shape = Phenotype
+    OPTION 2: Faceted Plot (The Professional Scientific View).
+    - Splits phenotypes into separate panels.
+    - Zero clutter/overlap.
     """
-    print("      -> Creating 5D Spatial Map (Loc vs Uniformity)...")
+    print("      -> Creating Faceted 5D Map...")
     
-    # Safety: Rename radius if needed
+    # Safety and Filtering
     if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
         df['Refined Radius (um)'] = df['radius']
-        
-    # Filter for valid cortex data (exclude very thin noise or errors)
     plot_df = df[df['t_cortex'] > 0.05].copy()
+    plot_df = plot_df[plot_df['Phenotype_Category'] != 'Excluded'] 
     
-    if plot_df.empty: return
-
-    plt.figure(figsize=(12, 9), dpi=125)
+    # Define order
+    cats = ['Fuzzy', 'Patchy', 'Uniform']
+    plot_df = plot_df[plot_df['Phenotype_Category'].isin(cats)]
     
-    # 1. Plot the Scatter
-    # X=Localization, Y=Uniformity
-    sns.scatterplot(
-        data=plot_df, 
+    # Create Grid
+    g = sns.relplot(
+        data=plot_df,
         x='A localization', 
-        y='uniformity', 
-        hue='rho_actin',              # Color = Density
-        size='Refined Radius (um)',   # Size = Radius
-        style='Phenotype_Category',   # Shape = Phenotype
-        sizes=(30, 400), 
-        palette='viridis', 
-        alpha=0.8, 
+        y='uniformity',
+        col='Phenotype_Category',  # Split by Phenotype
+        col_order=cats,
+        hue='rho_actin',           # Color = Density
+        size='Refined Radius (um)',
+        sizes=(40, 400),
+        palette='viridis',
+        kind='scatter',
+        height=5, 
+        aspect=0.9,
+        alpha=0.85,
         edgecolor='black'
     )
+    
+    # Draw reference lines on ALL panels
+    def draw_lines(*args, **kwargs):
+        plt.axvline(0.65, color='red', linestyle='--', alpha=0.4)
+        plt.axhline(0.4, color='red', linestyle='--', alpha=0.4)
+        plt.xlim(left=-0.05, right=1.05) # Fix X-axis cutoff here
+        plt.ylim(bottom=0)
 
-    # 2. Labels and Formatting
-    plt.title('5D Phenotype Map', fontsize=15)
-    plt.xlabel('Localization', fontsize=12)
-    plt.ylabel('Uniformity', fontsize=12)
+    g.map(draw_lines)
     
-    plt.grid(True, linestyle='--', alpha=0.3)
+    # Clean up titles
+    g.fig.suptitle("OPTION 2: Phenotype Separation: Localization vs Uniformity", y=1.05, fontsize=16)
+    g.set_titles("{col_name}")
+    g.set_axis_labels("Localization", "Uniformity")
     
-    # Move legend outside
-    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, title="Properties")
-    
-    # Set Limits (Standard 0-1 range roughly)
-    plt.xlim(left=0, right=1.05)
-    plt.ylim(bottom=0)
-    
-    plotting.save_plot("Cortex_5D_Bubble_Map.png", output_dir)
+    # Save manually since it's a FacetGrid object
+    g.savefig(os.path.join(output_dir, "Cortex_5D_Map_Faceted.png"), bbox_inches='tight')
+    plt.close()
+    print("      -> Plot saved: Cortex_5D_Map_Faceted.png")
 
 def plot_pairgrid(df, output_dir):
     """Generates Pair Grid."""
@@ -247,6 +253,6 @@ def run_phenotype_analysis(df, output_dir):
     
     # Run Updated Panel with Stats
     generate_phenotype_panel(df, output_dir)
-    plot_5d_scatter(df, output_dir)
+    plot_faceted_5d_map(df, output_dir)
     plot_pairgrid(df, output_dir)
     save_phenotype_statistics(df, output_dir)
