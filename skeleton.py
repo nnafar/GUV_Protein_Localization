@@ -8,6 +8,7 @@ Updated to include:
 - Robust localization calculation (np.max)
 - Actin cortical thickness and density metrics
 - Physical unit plotting (microns)
+- FIX: 'Lumenal Actin' logic (Preserves low density, checks peak position for thickness)
 
 @author: kkourkoulou (Updated by Gemini)
 """
@@ -797,45 +798,50 @@ def localization(num_channels, angular_profiles, radial_profiles, index_border_i
     return localization, comment
 
 
-def analyze_actin_structure(radial_profiles, angular_profiles, localization_score, protein_channel_index, px_size=1.0):
+def analyze_actin_structure(radial_profiles, angular_profiles, localization_score, protein_channel_index, px_size=1.0, border_in=0, border_out=0):
     """
-    Calculates actin cortex properties: Thickness (t_cortex), Density (rho_actin), Uniformity.
+    Calculates actin cortex properties.
+    FIXED: Calculates Density (rho) for ALL vesicles (including Lumenal Actin).
+    Only calculates Thickness (t_cortex) if localization is significant AND peak is at border.
     """
     # Initialize defaults
     t_cortex, rho_actin, uniformity = 0.0, 0.0, 0.0
     
-    # Only calculate structural metrics if there is significant localization
-    # (e.g. if localization < 0.2, there is likely no cortex to measure)
-    if localization_score < 0.2: return t_cortex, rho_actin, uniformity
-    
-    # --- 1. Calculate Thickness (t_cortex) ---
-    actin_radial = radial_profiles[:, protein_channel_index]
-    
-    # Find peaks in the actin channel
-    peaks, properties = find_peaks(actin_radial, height=np.max(actin_radial)*0.5)
-    
-    if len(peaks) > 0:
-        # Calculate FWHM (rel_height=0.5)
-        # Unpack the tuple correctly so 'widths' is just the array of widths
-        widths, width_heights, left_ips, right_ips = peak_widths(actin_radial, peaks, rel_height=0.5)
-        
-        # Select the peak with the highest intensity (Tallest, not Widest)
-        tallest_peak_idx = np.argmax(actin_radial[peaks])
-        
-        # Now we can safely access the width of the tallest peak
-        t_cortex_px = widths[tallest_peak_idx]
-        
-        t_cortex = t_cortex_px * px_size
-    
-    # --- 2. Calculate Density (rho_actin) ---
+    # --- 1. ALWAYS Calculate Density (rho_actin) ---
+    # Density exists regardless of where the actin is (lumen or cortex)
     actin_angular = angular_profiles[:, protein_channel_index]
     rho_actin = np.mean(actin_angular)
     
-    # --- 3. Calculate Uniformity (CV) ---
+    # --- 2. Calculate Uniformity (CV) ---
     if rho_actin > 0:
         stdev = np.std(actin_angular)
         uniformity = stdev / rho_actin
+
+    # --- 3. Conditionally Calculate Thickness (t_cortex) ---
+    # Only try to measure thickness if there is actually a cortex (Localization > 0.2)
+    if localization_score >= 0.2:
         
+        actin_radial = radial_profiles[:, protein_channel_index]
+        
+        # Find peaks in the actin channel
+        peaks, properties = find_peaks(actin_radial, height=np.max(actin_radial)*0.5)
+        
+        if len(peaks) > 0:
+            # Find the tallest peak
+            tallest_peak_idx = np.argmax(actin_radial[peaks])
+            peak_pos = peaks[tallest_peak_idx]
+            
+            # SPATIAL CHECK: Is the peak inside the membrane region?
+            # We allow a small buffer (e.g. +/- 2 pixels)
+            if (peak_pos >= border_in - 2) and (peak_pos <= border_out + 2):
+                
+                # Calculate FWHM (rel_height=0.5)
+                widths, width_heights, left_ips, right_ips = peak_widths(actin_radial, peaks, rel_height=0.5)
+                
+                # Get width of the tallest peak
+                t_cortex_px = widths[tallest_peak_idx]
+                t_cortex = t_cortex_px * px_size
+
     return t_cortex, rho_actin, uniformity
 
 
@@ -1193,14 +1199,15 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
     # 7. Actin Structure
     actin_idx = num_channels - 1
     loc_actin_score = localization_val[-1]
-    t_cortex, rho_actin, uniformity = analyze_actin_structure(radial_profiles, angular_profiles, loc_actin_score, actin_idx, pixel_size)
     
-    # --- FILTER EMPTY VESICLES ---
-    # If density is ~0.5 - 1.0 (we use < 2.0 to be safe), flag as empty
-    if rho_actin < 2.0:
-        comment.append("empty_vesicle")
-        # Optional: Set localization to 0 if it's just noise
-        localization_val[-1] = 0.0
+    # FIX: Pass the border indices to analyze_actin_structure
+    t_cortex, rho_actin, uniformity = analyze_actin_structure(radial_profiles, angular_profiles, loc_actin_score, actin_idx, pixel_size, index_border_in, index_border_out)
+    
+    # --- FILTER EMPTY VESICLES (DISABLED) ---
+    # We disable this so we can distinguish Empty vs Lumenal downstream
+    # if rho_actin < 2.0:
+    #     comment.append("empty_vesicle")
+    #     localization_val[-1] = 0.0
     # ----------------------------------
 
     # Final comments

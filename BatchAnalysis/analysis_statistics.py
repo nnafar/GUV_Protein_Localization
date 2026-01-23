@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 from scipy.stats import mannwhitneyu
+import plotting
 
 def cliffs_delta(lst1, lst2):
     """
@@ -73,26 +74,54 @@ def perform_mann_whitney(df, group_col, value_col, group1, group2):
         "Effect Strength": effect_str
     }
 
-def run_statistics(df, output_dir):
-    print("\n--- Running Statistical Analysis (Mann-Whitney U + Effect Size) ---")
+def run_spearman_correlation(df, output_dir):
+    """Calculates and plots Spearman Correlation Matrix."""
+    print("  -> Calculating Spearman Correlations...")
     
+    # Ensure radius column exists
+    if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
+        df['Refined Radius (um)'] = df['radius']
+        
+    target_cols = ['Refined Radius (um)', 't_cortex', 'rho_actin', 'A localization', 'uniformity']
+    valid_cols = [c for c in target_cols if c in df.columns]
+    
+    # Filter for formed cortices (>0.05) to avoid noise from empty vesicles
+    corr_df = df[df['t_cortex'] > 0.05][valid_cols].copy()
+    
+    if corr_df.empty or len(valid_cols) < 2:
+        print("    ! Not enough data for correlation.")
+        return
+
+    # Calculate Spearman (Rank-based)
+    corr_matrix = corr_df.corr(method='spearman')
+    
+    # Save CSV
+    path = os.path.join(output_dir, "Spearman_Correlation_Matrix.csv")
+    corr_matrix.to_csv(path)
+    print(f"    -> Matrix saved: {path}")
+    
+    # Plot Heatmap
+    plotting.plot_correlation_heatmap(corr_matrix, output_dir)
+
+
+def run_statistics(df, output_dir):
+    print("\n--- Running Statistical Analysis (Mann-Whitney U + Spearman) ---")
+    
+    # 1. Run Hypothesis Tests (Group Differences)
     results = []
     cortex_df = df[df['t_cortex'] > 0.05].copy()
 
     # Define the comparisons you care about
-    # Format: (Column, Group1, Group2)
     comparisons = [
         # Experimental
         ('Category', 'BranchedCortex', 'LinearCortex'),
         
-        # Phenotypic - Transition vs Stable
-        ('Phenotype_Category', 'Fuzzy', 'Uniform'),
-        
-        # Phenotypic - Stability (Patchy vs Uniform)
+        # Main Pathway (Keep these)
+        ('Phenotype_Category', 'Sparse', 'Uniform'),
         ('Phenotype_Category', 'Patchy', 'Uniform'),
-
-        # NEW: Phenotypic - Transition vs Formed Patchy
-        ('Phenotype_Category', 'Fuzzy', 'Patchy')
+        ('Phenotype_Category', 'Sparse', 'Patchy'),
+        ('Phenotype_Category', 'Empty', 'Lumenal Actin'), # Validates detection limit
+        ('Phenotype_Category', 'Lumenal Actin', 'Sparse')  # Validates Sparse structure
     ]
     
     metrics = ['t_cortex', 'rho_actin', 'A localization', 'uniformity']
@@ -102,9 +131,6 @@ def run_statistics(df, output_dir):
         if g1 in df[col].values and g2 in df[col].values:
             print(f"  -> Testing {g1} vs {g2}...")
             for metric in metrics:
-                # Skip uniformity if not relevant (e.g. for Fuzzy vs Thick)
-                #if metric == 'uniformity' and 'Thick' in g1: continue 
-                
                 res = perform_mann_whitney(cortex_df, col, metric, g1, g2)
                 if res: results.append(res)
 
@@ -112,9 +138,9 @@ def run_statistics(df, output_dir):
         stats_df = pd.DataFrame(results)
         output_path = os.path.join(output_dir, "Statistical_Report_Full.csv")
         stats_df.to_csv(output_path, index=False)
-        
         print(f"  -> Report saved: {output_path}")
-        # Print a clean summary to console
-        print("\n" + stats_df[['Comparison', 'Metric', 'p-value', 'Significance', 'Effect Strength']].to_string(index=False))
     else:
         print("  ! No valid comparisons found.")
+        
+    # 2. Run Correlation Analysis (Relationships)
+    run_spearman_correlation(df, output_dir)

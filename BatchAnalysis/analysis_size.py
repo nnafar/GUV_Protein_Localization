@@ -40,7 +40,7 @@ def run_size_analysis(df, output_dir):
         xlabel='Refined Radius (µm)',
         output_dir=output_dir,
         filename='Global_Size_Distribution.png',
-        color='steelblue'
+        color=None
     )
 
     # 2. Violin Plot
@@ -54,5 +54,5 @@ def run_size_analysis(df, output_dir):
         filename='Category_Size_Comparison_Violin.png'
     )
     
-    # 3. Save Statistics (NEW)
+    # 3. Save Statistics
     save_size_statistics(df, output_dir)

@@ -1,16 +1,86 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jan 20 16:30:31 2026
-
-@author: nnafar
+PLOTTING MODULE
+Centralized plotting configuration using the Blue-to-Red color scheme.
 """
 
 import os
 import matplotlib
-matplotlib.use('Agg') # Add this before importing pyplot
+matplotlib.use('Agg') # Non-interactive backend
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import seaborn as sns
 import numpy as np
+from typing import Tuple, List
+
+
+# =============================================================================
+# 1. BlUE-TO-RED STYLE DEFINITIONS
+# =============================================================================
+
+MFA_COLORS = {
+    # Reference Palette (Hex)
+    'dark_blue':   '#1065AB', # R 016, G 101, B 171
+    'medium_blue': '#3A93C3', # R 058, G 147, B 195
+    'light_blue':  '#8EC4DE', # R 142, G 196, B 222
+    'pale_blue':   '#D1E5F0', # R 209, G 229, B 240
+    'light_grey':  '#E7E6E3', # R 231, G 230, B 227
+    'white':       '#F9F9F9', # R 249, G 249, B 249
+    'pale_red':    '#FDDBC7', # R 254, G 219, B 199
+    'light_red':   '#F6A482', # R 246, G 164, B 130
+    'medium_red':  '#D75F4C', # R 215, G 095, B 076
+    'dark_red':    '#B31529', # R 179, G 021, B 041
+    
+    # Semantic Mapping for Plots
+    'grid':        '#D1E5F0', 
+    'primary':     '#000000',
+}
+
+# Define the Phenotype Mapping (Ensures consistency across all plots)
+PHENOTYPE_PALETTE = {
+    'Uniform':       MFA_COLORS['dark_blue'],
+    'Patchy':        MFA_COLORS['medium_blue'],
+    'Sparse':         MFA_COLORS['light_red'],
+    'Lumenal Actin': MFA_COLORS['dark_red'],
+    'Empty':         MFA_COLORS['light_grey'],
+    'Excluded':      '#555555' # Dark Grey
+}
+
+def set_paper_style(base_fontsize: int = 14, dpi: int = 300) -> None:
+    """Applies publication-quality style to Matplotlib plots."""
+    plt.rcdefaults() 
+    mpl.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'DejaVu Sans'],
+        'font.size': base_fontsize,
+        'axes.labelsize': base_fontsize,
+        'axes.titlesize': base_fontsize + 2,
+        'axes.titleweight': 'bold',
+        'legend.fontsize': base_fontsize - 2,
+        'legend.frameon': False, # Cleaner look
+        'figure.dpi': dpi,
+        'figure.facecolor': 'white',
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'grid.alpha': 0.5,
+        'grid.color': MFA_COLORS['grid'],
+        'grid.linestyle': '--',
+        'lines.linewidth': 2.0,
+    })
+
+def get_phenotype_palette():
+    """Returns the dictionary mapping phenotypes to MFA colors."""
+    return PHENOTYPE_PALETTE
+
+def get_gradient_cmap():
+    """Returns a LinearSegmentedColormap from Blue to Red."""
+    colors = [MFA_COLORS['dark_blue'], MFA_COLORS['light_blue'], 
+              MFA_COLORS['pale_red'], MFA_COLORS['dark_red']]
+    return mpl.colors.LinearSegmentedColormap.from_list("mfa_gradient", colors)
+
+# =============================================================================
+# 2. PLOTTING FUNCTIONS
+# =============================================================================
 
 def save_plot(filename, output_dir):
     """Helper to save and close plots."""
@@ -19,139 +89,133 @@ def save_plot(filename, output_dir):
     plt.close()
     print(f"  -> Plot saved: {filename}")
 
-def plot_histogram(data, column, title, xlabel, output_dir, filename, color='teal', bins='rice'):
+
+def plot_histogram(data, column, title, xlabel, output_dir, filename, color=None):
     """Generates a standard Histogram with KDE."""
-    plt.figure(figsize=(8, 6), dpi=125)
+    if color is None: color = MFA_COLORS['medium_blue']
     
+    plt.figure(figsize=(8, 6))
     mean_val = np.mean(data[column])
     
-    sns.histplot(data=data, x=column, bins=bins, kde=True, color=color, edgecolor='black', alpha=0.6)
-    plt.axvline(mean_val, color='red', linestyle='--', label=f'Mean: {mean_val:.2f}')
+    sns.histplot(data=data, x=column, kde=True, color=color, edgecolor='white', alpha=0.8)
+    plt.axvline(mean_val, color=MFA_COLORS['dark_red'], linestyle='--', lw=2, label=f'Mean: {mean_val:.2f}')
     
-    plt.title(title, fontsize=14)
-    plt.xlabel(xlabel, fontsize=12)
-    plt.ylabel('Count', fontsize=12)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel('Count')
     plt.legend()
-    plt.grid(axis='y', alpha=0.3)
+    plt.grid(axis='y')
     
     save_plot(filename, output_dir)
 
-# def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir, filename, hue=None):
-#     """Generates a Boxplot with Strip (jitter) points overlay."""
-#     plt.figure(figsize=(10, 6), dpi=125)
-    
-#     # Assign 'x' to 'hue' if no specific hue is provided to satisfy FutureWarnings
-#     plot_hue = hue if hue is not None else x_col
-    
-#     # Plot Boxplot (legend=False prevents duplicate legend entries)
-#     sns.boxplot(data=data, x=x_col, y=y_col, hue=plot_hue, palette="Set2", showfliers=False, legend=False)
-    
-#     # Plot Strip points (jitter)
-#     sns.stripplot(data=data, x=x_col, y=y_col, hue=hue, color='black', size=3, alpha=0.4, dodge=True)
-    
-#     plt.title(title, fontsize=14)
-#     plt.ylabel(ylabel, fontsize=12)
-#     plt.xticks(rotation=45, ha='right')
-#     plt.grid(axis='y', alpha=0.3)
-    
-#     # Clean up legend if stripplot added one
-#     if plt.gca().get_legend():
-#         plt.gca().get_legend().remove()
-    
-#     save_plot(filename, output_dir)
 
-def plot_scatter(data, x_col, y_col, hue_col, title, xlabel, ylabel, output_dir, filename):
-    """Generates a Scatter plot colored by category."""
-    plt.figure(figsize=(9, 7), dpi=125)
-    
-    sns.scatterplot(data=data, x=x_col, y=y_col, hue=hue_col, style=hue_col, s=60, alpha=0.7, palette="viridis")
-    
-    plt.title(title, fontsize=14)
-    plt.xlabel(xlabel, fontsize=12)
-    plt.ylabel(ylabel, fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    save_plot(filename, output_dir)
-    
-
-def plot_phenotype_composition(data, category_col, phenotype_col, output_dir, filename):
-    """
-    Generates a 100% Stacked Bar Plot showing the composition of phenotypes
-    within each experimental category.
-    """
-    # 1. Calculate Counts and Normalize to Percentage
-    counts = data.groupby([category_col, phenotype_col]).size().unstack(fill_value=0)
-    
-    # Convert to percentages (row-wise normalization)
-    percents = counts.div(counts.sum(axis=1), axis=0) * 100
-    
-    # 2. Plot
-    plt.figure(figsize=(10, 6), dpi=125)
-    
-    # Use pandas plotting for the stacked structure
-    ax = percents.plot(kind='bar', stacked=True, colormap='viridis', alpha=0.85, edgecolor='black', rot=45)
-    
-    plt.title('Phenotypic Composition by Category', fontsize=14)
-    plt.xlabel('Experimental Category', fontsize=12)
-    plt.ylabel('Percentage of Vesicles (%)', fontsize=12)
-    plt.legend(title='Phenotype', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(axis='y', alpha=0.3)
-    
-    # Save using the figure object
-    fig = ax.get_figure()
-    path = os.path.join(output_dir, filename)
-    fig.savefig(path, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  -> Plot saved: {filename}")
-    
-    
 def plot_violin_comparison(data, x_col, y_col, title, ylabel, output_dir, filename):
     """Generates a Violin plot to show density distribution."""
-    plt.figure(figsize=(10, 6), dpi=125)
+    plt.figure(figsize=(10, 6))
     
-    # Inner='quartile' draws dashed lines for median and quartiles
-    # Set hue=x_col and legend=False to fix the warning
-    sns.violinplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, palette="Set2", inner="quartile", alpha=0.6)
+    # Use MFA colors if not Phenotype
+    if x_col == 'Phenotype_Category':
+        palette = PHENOTYPE_PALETTE
+    else:
+        # Default to MFA Blues for experimental categories
+        palette = [MFA_COLORS['medium_blue'], MFA_COLORS['light_blue'], 
+                   MFA_COLORS['dark_blue'], MFA_COLORS['pale_blue']]
     
-    # Optional: Add strip plot on top for individual points (if data isn't too huge)
-    sns.stripplot(data=data, x=x_col, y=y_col, color='black', size=2, alpha=0.3, jitter=True)
+    sns.violinplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, 
+                   palette=palette, inner="quartile", alpha=0.8, linewidth=1)
     
-    plt.title(title, fontsize=14)
-    plt.ylabel(ylabel, fontsize=12)
+    sns.stripplot(data=data, x=x_col, y=y_col, color='black', size=3, alpha=0.2, jitter=True)
+    
+    plt.title(title)
+    plt.ylabel(ylabel)
     plt.xticks(rotation=45, ha='right')
-    plt.grid(axis='y', alpha=0.3)
+    plt.grid(axis='y')
     
     save_plot(filename, output_dir)
-    
 
-def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir=None, filename=None, ax=None):
-    """
-    Generates a boxplot comparing a numerical variable across categories.
-    Can draw on an existing axis 'ax' if provided, or create a new figure.
-    """
-    # Determine if we are drawing on an existing subplot or creating a new one
+def get_experiment_palette():
+    """Returns the standard blues for non-phenotype comparisons."""
+    return [MFA_COLORS['medium_blue'], MFA_COLORS['light_blue'], 
+            MFA_COLORS['dark_blue'], MFA_COLORS['pale_blue']]
+    
+def plot_boxplot_comparison(data, x_col, y_col, title, ylabel, output_dir=None, filename=None, ax=None, order=None):
+    """Generates a boxplot comparing a numerical variable across categories."""
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
         is_standalone = True
     else:
-        # We are drawing onto an existing subplot passed from outside
         is_standalone = False
 
-    # Create Boxplot on the specified axis
-    # Added 'hue' to avoid future warning, set legend=False
-    sns.boxplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, ax=ax, palette='Set2')
+    # Use the centralized palette
+    if x_col == 'Phenotype_Category':
+        palette = PHENOTYPE_PALETTE
+    else:
+        # Match the Violin Plot logic (Cycle through MFA Blues)
+        palette = get_experiment_palette()
+
+    # Pass the 'order' parameter to seaborn
+    sns.boxplot(data=data, x=x_col, y=y_col, hue=x_col, legend=False, ax=ax, 
+                palette=palette, order=order, boxprops=dict(alpha=0.8), showfliers=False)
     
-    # Overlay strip plot for individual data points (optional, but nice)
-    sns.stripplot(data=data, x=x_col, y=y_col, color='black', alpha=0.3, jitter=True, ax=ax)
+    sns.stripplot(data=data, x=x_col, y=y_col, color='black', alpha=0.3, jitter=True, size=3, ax=ax, order=order)
 
-    # Customize the specific axis
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_xlabel(x_col, fontsize=12)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(x_col)
     ax.tick_params(axis='x', rotation=45)
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.grid(axis='y')
 
-    # Only save automatically if it's a standalone plot AND filename is provided
     if is_standalone and filename and output_dir:
          save_plot(filename, output_dir)
+
+
+def plot_phenotype_composition(data, category_col, phenotype_col, output_dir, filename):
+    """Generates a 100% Stacked Bar Plot."""
+    counts = data.groupby([category_col, phenotype_col]).size().unstack(fill_value=0)
+    percents = counts.div(counts.sum(axis=1), axis=0) * 100
+    
+    # Map colors manually to match the stack
+    stack_colors = [PHENOTYPE_PALETTE.get(col, '#999999') for col in percents.columns]
+
+    plt.figure(figsize=(10, 6))
+    ax = percents.plot(kind='bar', stacked=True, color=stack_colors, 
+                       alpha=0.9, edgecolor='white', rot=45, width=0.7)
+    
+    plt.title('Phenotypic Composition by Category')
+    plt.xlabel('Experimental Category')
+    plt.ylabel('Percentage of Vesicles (%)')
+    plt.legend(title='Phenotype', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(axis='y')
+    
+    fig = plt.gcf()
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  -> Plot saved: {filename}")
+
+def plot_correlation_heatmap(corr_matrix, output_dir):
+    """Plots a Spearman Correlation Heatmap using MFA Diverging Colors."""
+    plt.figure(figsize=(10, 8))
+    
+    # Custom Diverging Palette (Blue -> White -> Red)
+    colors = [MFA_COLORS['dark_blue'], MFA_COLORS['white'], MFA_COLORS['dark_red']]
+    cmap = mpl.colors.LinearSegmentedColormap.from_list("mfa_diverging", colors)
+    
+    # Mask the upper triangle (redundant info)
+    mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+    
+    sns.heatmap(
+        corr_matrix, 
+        mask=mask, 
+        cmap=cmap, 
+        center=0, vmin=-1, vmax=1,
+        annot=True, fmt=".2f", 
+        square=True, linewidths=1, linecolor='white',
+        cbar_kws={"shrink": .7, "label": "Spearman Correlation (r)"}
+    )
+    
+    plt.title('Spearman Correlation Matrix (Non-Parametric)', fontsize=16, pad=20)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    
+    save_plot("Spearman_Correlation_Heatmap.png", output_dir)
