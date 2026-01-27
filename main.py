@@ -25,10 +25,10 @@ import csv
 #------------------------- INPUT --------------------------------
 
 ## Specify paths to the directories containing the data:
-path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C1"
-path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C1\Detected"
+path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1"
+path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1\Detected"
 path_septin       = r"" 
-path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251110_BranchedCortex\ImageSequences\C3"
+path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C3"
 
 # Define where you want the output saved 
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"

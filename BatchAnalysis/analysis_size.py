@@ -32,15 +32,16 @@ def run_size_analysis(df, output_dir):
     """
     print("\n--- Running Size Distribution Analysis ---")
     
-    # 1. Global Histogram
+    # 1. Comparison Histogram (Transparent Overlap)
+    # Uses 'hue' to separate Branched/Linear on the same plot
     plotting.plot_histogram(
         data=df,
         column='Refined Radius (um)',
-        title='Global Size Distribution (All Categories)',
+        title='Size Distribution by Category',
         xlabel='Refined Radius (µm)',
         output_dir=output_dir,
-        filename='Global_Size_Distribution.png',
-        color=None
+        filename='Global_Size_Distribution.png', # Filename kept, content changed
+        hue='Category'
     )
 
     # 2. Violin Plot

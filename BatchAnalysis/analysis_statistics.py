@@ -74,73 +74,54 @@ def perform_mann_whitney(df, group_col, value_col, group1, group2):
         "Effect Strength": effect_str
     }
 
-def run_spearman_correlation(df, output_dir):
+def run_spearman_correlation(df, output_dir, filename_suffix=""):
     """Calculates and plots Spearman Correlation Matrix."""
-    print("  -> Calculating Spearman Correlations...")
-    
-    # Ensure radius column exists
     if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
         df['Refined Radius (um)'] = df['radius']
         
     target_cols = ['Refined Radius (um)', 't_cortex', 'rho_actin', 'A localization', 'uniformity']
     valid_cols = [c for c in target_cols if c in df.columns]
     
-    # Filter for formed cortices (>0.05) to avoid noise from empty vesicles
     corr_df = df[df['t_cortex'] > 0.05][valid_cols].copy()
-    
-    if corr_df.empty or len(valid_cols) < 2:
-        print("    ! Not enough data for correlation.")
-        return
+    if corr_df.empty or len(valid_cols) < 2: return
 
-    # Calculate Spearman (Rank-based)
     corr_matrix = corr_df.corr(method='spearman')
-    
-    # Save CSV
-    path = os.path.join(output_dir, "Spearman_Correlation_Matrix.csv")
+    path = os.path.join(output_dir, f"Spearman_Correlation_Matrix{filename_suffix}.csv")
     corr_matrix.to_csv(path)
-    print(f"    -> Matrix saved: {path}")
     
-    # Plot Heatmap
-    plotting.plot_correlation_heatmap(corr_matrix, output_dir)
+    # Pass suffix to plotting function
+    plotting.plot_correlation_heatmap(corr_matrix, output_dir, filename_suffix)
 
 
 def run_statistics(df, output_dir):
-    print("\n--- Running Statistical Analysis (Mann-Whitney U + Spearman) ---")
+    print("\n--- Running Statistical Analysis ---")
     
-    # 1. Run Hypothesis Tests (Group Differences)
+    # 1. Global Hypothesis Tests
     results = []
     cortex_df = df[df['t_cortex'] > 0.05].copy()
-
-    # Define the comparisons you care about
     comparisons = [
-        # Experimental
         ('Category', 'BranchedCortex', 'LinearCortex'),
-        
-        # Main Pathway (Keep these)
         ('Phenotype_Category', 'Sparse', 'Uniform'),
         ('Phenotype_Category', 'Patchy', 'Uniform'),
-        ('Phenotype_Category', 'Sparse', 'Patchy'),
-        ('Phenotype_Category', 'Empty', 'Lumenal Actin'), # Validates detection limit
-        ('Phenotype_Category', 'Lumenal Actin', 'Sparse')  # Validates Sparse structure
     ]
-    
     metrics = ['t_cortex', 'rho_actin', 'A localization', 'uniformity']
 
     for col, g1, g2 in comparisons:
-        # Check if groups actually exist in the data
         if g1 in df[col].values and g2 in df[col].values:
-            print(f"  -> Testing {g1} vs {g2}...")
             for metric in metrics:
                 res = perform_mann_whitney(cortex_df, col, metric, g1, g2)
                 if res: results.append(res)
-
     if results:
-        stats_df = pd.DataFrame(results)
-        output_path = os.path.join(output_dir, "Statistical_Report_Full.csv")
-        stats_df.to_csv(output_path, index=False)
-        print(f"  -> Report saved: {output_path}")
-    else:
-        print("  ! No valid comparisons found.")
-        
-    # 2. Run Correlation Analysis (Relationships)
-    run_spearman_correlation(df, output_dir)
+        pd.DataFrame(results).to_csv(os.path.join(output_dir, "Statistical_Report_Full.csv"), index=False)
+
+    # 2. SPLIT CORRELATIONS: Loop through categories
+    unique_cats = df['Category'].unique()
+    print(f"  -> Generating Heatmaps for: {unique_cats}")
+    
+    # A. Global Heatmap
+    run_spearman_correlation(df, output_dir, filename_suffix="_Global")
+    
+    # B. Per-Category Heatmap
+    for cat in unique_cats:
+        cat_df = df[df['Category'] == cat].copy()
+        run_spearman_correlation(cat_df, output_dir, filename_suffix=f"_{cat}")

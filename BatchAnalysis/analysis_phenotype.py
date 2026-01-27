@@ -123,13 +123,21 @@ def add_stat_annotation(ax, df, x_col, y_col, group1, group2, order, level=0):
 # 2. PLOTTING FUNCTIONS
 # =============================================================================
 
-def generate_phenotype_panel(df, output_dir):
-    print("      -> Creating 2x2 Phenotype Panel (MFA Style)...")
+def generate_category_panel(df, output_dir):
+    """
+    Comparison Panel: Experimental Category on X-Axis.
+    Split by Phenotype (Hue).
+    Includes STATISTICAL ANNOTATION and filters 'Empty' from Uniformity.
+    """
+    print("      -> Creating 2x2 Category Comparison Panel (Grouped + Stats)...")
     plot_df = df[df['Phenotype_Category'] != 'Excluded'].copy()
     
-    # Plotting order:     
-    order = ["Empty", "Lumenal Actin", "Sparse", "Patchy", "Uniform"]
-    existing_order = [c for c in order if c in plot_df['Phenotype_Category'].unique()]
+    # Define which pairs we want to test for significance
+    # We focus on the most relevant cortical transition: Patchy vs Uniform
+    stats_pairs = [
+        ('Patchy', 'Uniform'),
+        ('Sparse', 'Patchy')
+    ]
     
     params = [
         ('A localization', 'A Localization'),
@@ -138,39 +146,40 @@ def generate_phenotype_panel(df, output_dir):
         ('uniformity', 'Uniformity (CV)')
     ]
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten() 
 
     for i, (col, title) in enumerate(params):
         ax = axes[i]
+        
         if col in plot_df.columns:
-            # PASS THE ORDER HERE
+            # --- INTELLIGENT DATA FILTERING ---
+            # 1. Thickness: Remove Empty/Lumenal (No cortex to measure)
+            if col == 't_cortex':
+                 sub_df = plot_df[~plot_df['Phenotype_Category'].isin(['Empty', 'Lumenal Actin'])]
+            
+            # 2. Uniformity: Remove Empty (Noise) <--- THIS FIXES THE SCALE ISSUE
+            elif col == 'uniformity':
+                 sub_df = plot_df[~plot_df['Phenotype_Category'].isin(['Empty'])]
+            
+            # 3. Others: Keep all
+            else:
+                 sub_df = plot_df
+
             plotting.plot_boxplot_comparison(
-                data=plot_df, x_col='Phenotype_Category', y_col=col, 
-                title=title, ylabel=col, ax=ax, order=existing_order
+                data=sub_df, 
+                x_col='Category',   
+                y_col=col, 
+                hue='Phenotype_Category', 
+                title=title, 
+                ylabel=col, 
+                ax=ax,
+                box_pairs=stats_pairs # Pass the pairs to compare!
             )
             
-            # --- STATISTICAL ANNOTATIONS ---
-           
-            # 1. Validation: Empty vs Lumenal (Level 0)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Empty", "Lumenal Actin", existing_order, level=0)
-            
-            # 2. Validation: Lumenal vs Sparse (Level 1)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Lumenal Actin", "Sparse", existing_order, level=1)
-            
-            # 3. Comparison: Sparse vs Patchy (Level 0)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Sparse", "Patchy", existing_order, level=0)
-            
-            # 4. Comparison: Patchy vs Uniform (Level 0)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Patchy", "Uniform", existing_order, level=0)
-
-            # 5. Comparison: Sparse vs Uniform (Level 2 - Higher up)
-            add_stat_annotation(ax, plot_df, 'Phenotype_Category', col, "Sparse", "Uniform", existing_order, level=2)
-            
-            # Clean up X-axis
-            ax.tick_params(axis='x', rotation=45)
+            # Clean up
             ax.set_xlabel('') 
-            ax.set_ylim(top=ax.get_ylim()[1] * 1.4) # Increase headroom for stacked brackets
+            if i < 2: ax.set_xlabel('') # Only show X labels on bottom row usually, but we rotate them anyway
         else:
             ax.text(0.5, 0.5, "Data Not Found", ha='center')
 
@@ -178,20 +187,14 @@ def generate_phenotype_panel(df, output_dir):
     plotting.save_plot("Phenotype_Characteristics_Panel_2x2.png", output_dir)
 
 
-def plot_5d_scatter(df, output_dir):
+def plot_5d_scatter(df, output_dir, filename_suffix=""):
     """
-    OPTION 1: Clean Phenotype Map (Color = Phenotype).
-    - X vs Y shows the decision logic.
-    - Color shows the PHENOTYPE (so you know what is what).
-    - Size shows Radius.
+    Creates the 5D scatter map.
+    If 'filename_suffix' is provided, it saves a separate file (e.g., per category).
     """
-    print("      -> Creating Clean Phenotype Map...")
-    
-    # Safety: Ensure radius column exists
     if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
         df['Refined Radius (um)'] = df['radius']
         
-    # Filter Data
     plot_df = df[df['t_cortex'] > 0.05].copy()
     plot_df = plot_df[plot_df['Phenotype_Category'] != 'Excluded'] 
     
@@ -199,58 +202,40 @@ def plot_5d_scatter(df, output_dir):
 
     plt.figure(figsize=(10, 8))
     
-    # MAIN PLOT: Use get_phenotype_palette() for MFA Colors
     sns.scatterplot(
-        data=plot_df, 
-        x='A localization', 
-        y='uniformity', 
-        hue='Phenotype_Category',       # Color by Category
-        style='Phenotype_Category',     # Shape by Category (Accessibility)
-        size='Refined Radius (um)', 
-        sizes=(40, 400), 
-        palette=plotting.get_phenotype_palette(), 
-        alpha=0.85, 
-        edgecolor='white'
+        data=plot_df, x='A localization', y='uniformity', 
+        hue='Phenotype_Category', style='Phenotype_Category',
+        size='Refined Radius (um)', sizes=(40, 400), 
+        palette=plotting.get_phenotype_palette(), alpha=0.85, edgecolor='white'
     )
 
-    # BOUNDARIES: Use MFA Light Grey
+    # Boundaries
     mfa_grey = plotting.MFA_COLORS['light_grey']
     mfa_dark = plotting.MFA_COLORS['dark_blue']
-    mfa_med  = plotting.MFA_COLORS['medium_blue']
-
     plt.axvline(0.65, color=mfa_grey, linestyle='--', lw=2)
     plt.axhline(0.4, color=mfa_grey, linestyle='--', lw=2)
-    
-    # TEXT: Use MFA Blues for Semantic labels
     plt.text(0.66, 0.02, 'Uniform Zone', color=mfa_dark, fontweight='bold')
-    plt.text(0.66, 1.4, 'Patchy (High Loc)', color=mfa_med)
 
-    # Standard Formatting
-    plt.title('Phenotype Map: Localization vs Uniformity')
-    plt.xlabel('Localization (Higher is Better)')
-    plt.ylabel('Uniformity (Lower is Better)')
+    plt.title(f'Phenotype Map: {filename_suffix.strip("_")}')
     plt.xlim(left=-0.05, right=1.05)
     plt.ylim(bottom=0)
     plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', title="Phenotype")
     
-    plotting.save_plot("Cortex_5D_Map.png", output_dir)
+    plotting.save_plot(f"Cortex_5D_Map{filename_suffix}.png", output_dir)
 
-def plot_pairgrid(df, output_dir):
-    print("      -> Creating Correlation Matrix...")
-    
-    # Safety: Ensure the radius column is named correctly
+def plot_pairgrid(df, output_dir, filename_suffix=""):
+    """
+    Creates correlation matrix (PairPlot).
+    """
     if 'Refined Radius (um)' not in df.columns and 'radius' in df.columns:
         df['Refined Radius (um)'] = df['radius']
     
-    # Define columns to include in the matrix
     cols = ['Refined Radius (um)', 't_cortex', 'rho_actin', 'A localization', 'uniformity', 'Phenotype_Category']
-    
     plot_df = df[df['t_cortex'] > 0.05][cols].copy()
     plot_df = plot_df[plot_df['Phenotype_Category'].isin(plotting.get_phenotype_palette().keys())]
     
-    if plot_df.empty: return
+    if plot_df.empty or len(plot_df) < 5: return # Skip if too little data
 
-    # Apply Style manually since PairGrid creates its own figure
     plotting.set_paper_style(base_fontsize=12) 
     
     g = sns.pairplot(
@@ -258,26 +243,35 @@ def plot_pairgrid(df, output_dir):
         palette=plotting.get_phenotype_palette(),
         corner=True, plot_kws={'alpha': 0.7, 's': 40, 'edgecolor': 'white'}
     )
-    g.fig.suptitle("Multi-Variable Correlation Matrix", y=1.02)
-    g.savefig(os.path.join(output_dir, "Correlation_Matrix_PairPlot.png"), bbox_inches='tight')
+    g.fig.suptitle(f"Multi-Variable Correlation {filename_suffix}", y=1.02)
+    g.savefig(os.path.join(output_dir, f"Correlation_Matrix_PairPlot{filename_suffix}.png"), bbox_inches='tight')
     plt.close()
 
 
 def run_phenotype_analysis(df, output_dir):
-    print("\n--- Running Phenotype & Cortex Analysis (MFA Style) ---")
-    
-    # 1. Apply Global Style
+    print("\n--- Running Phenotype & Cortex Analysis (Category Split) ---")
     plotting.set_paper_style() 
 
     df = categorize_vesicles(df)
     
-    # Save Log
-    log_cols = ['Date', 'Name', 'Vesicle id', 'Phenotype_Category', 'A localization', 't_cortex', 'rho_actin', 'uniformity']
-    existing_cols = [c for c in log_cols if c in df.columns]
-    df[existing_cols].to_csv(os.path.join(output_dir, "Phenotype_Categorization_Log.csv"), index=False)
-    
+    # 1. Composition Plot (Global)
     plotting.plot_phenotype_composition(df, 'Category', 'Phenotype_Category', output_dir, 'Phenotype_Composition_Stacked.png')
-    generate_phenotype_panel(df, output_dir)
-    plot_pairgrid(df, output_dir)
-    plot_5d_scatter(df, output_dir)
+    
+    # 2. Comparison Panel (X-Axis = Category)
+    generate_category_panel(df, output_dir)
+    
+    # 3. SPLIT PLOTS: Loop through each Category and generate separate maps/matrices
+    unique_cats = df['Category'].unique()
+    print(f"      -> Generating separate maps for: {unique_cats}")
+    
+    for cat in unique_cats:
+        cat_df = df[df['Category'] == cat].copy()
+        suffix = f"_{cat}"
+        
+        # A. 5D Map per Category
+        plot_5d_scatter(cat_df, output_dir, filename_suffix=suffix)
+        
+        # B. PairGrid per Category
+        plot_pairgrid(cat_df, output_dir, filename_suffix=suffix)
+        
     save_phenotype_statistics(df, output_dir)
