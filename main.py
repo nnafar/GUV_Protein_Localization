@@ -21,14 +21,15 @@ import numpy as np
 import skeleton as skl
 from joblib import Parallel, delayed
 import csv
+import os
 
 #------------------------- INPUT --------------------------------
 
 ## Specify paths to the directories containing the data:
-path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1"
-path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1\Detected"
+path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251106_BranchedCortex_Well2\ImageSequences\C1"
+path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251106_BranchedCortex_Well2\ImageSequences\C1\Detected"
 path_septin       = r"" 
-path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C3"
+path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251106_BranchedCortex_Well2\ImageSequences\C3"
 
 # Define where you want the output saved 
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
@@ -59,23 +60,25 @@ n_jobs = -1  # -1 means use all available CPUs. Set to 1 for standard sequential
 #------------------------ PREPARATION ---------------------------
 ## Rearranging input:
 proteins_present    = np.array((Septin, Actin), dtype = bool)
+
+# NOTE: skeleton.py expects these as Arrays to use index access (e.g. parameters[0])
 parameters_profiles = np.array((num_angles, length_excess, dr))
 parameters_sizes    = np.array((size_mask, size_view, size_central_area))
 
 ## Finding experiment and image information by scanning the Membrane (C1) folder:
 exp_info_all_sets   = skl.find_projects_info(path_membrane)
 
+# Handle case where only 1 set is found (ensure 2D array)
 if exp_info_all_sets.ndim == 1:
     num_sets = 1
+    exp_info_all_sets = exp_info_all_sets.reshape(1, -1)
 else:
     num_sets = len(exp_info_all_sets[:,0])
 
 for s in range(num_sets):
     
-    if exp_info_all_sets.ndim == 1:
-        exp_info = exp_info_all_sets
-    else:
-        exp_info = exp_info_all_sets[s,:]
+    exp_info = exp_info_all_sets[s,:]
+    print(f"--- Processing Set {s+1}/{num_sets}: {exp_info[2]} ---")
     
     ## Create Directory Structure: Output/Date_Exp/Region_ID
     final_output_path = skl.create_directory_structure(path_to_output_root, exp_info)
@@ -84,38 +87,34 @@ for s in range(num_sets):
     output_csv_path = skl.create_output_file(final_output_path, proteins_present)
 
     ## Reading image data:
-    channels_data, coordinates, _ = skl.read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present)
-    
-    # --- MANUAL PIXEL SIZE ---
-    pixel_size = 0.07 # um/pixel (Leica Metadata)
-    # -------------------------
+    # UPDATED: Now unpacks 3 values (data, coords, pixel_size)
+    channels_data, coordinates, pixel_size = skl.read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present)
     
     ## Creating colormaps
     skl.color_maps()
 
     ## Deriving useful parameters: 
     num_vesicles = len(coordinates[:,0])
-    num_channels = len(channels_data[0,0,:])
-    image_dim  = np.array((len(channels_data[0,:,0]), len(channels_data[:,0,0])))
+    # Ensure dimensions are read correctly (Y, X)
+    image_dim  = np.array((channels_data.shape[1], channels_data.shape[0])) 
 
     ## Optional plotting of the membrane channel with annotated vesicle centres:
     skl.detected_centres(plot_detected_centres, num_vesicles, channels_data[:,:,0], coordinates[:,1], coordinates[:,2], final_output_path, exp_info)
 
     ## Optional manual choice of thresholding method (default method:Li):
+    # Pass first vesicle coordinates for threshold estimation
     threshold_membrane = skl.define_threshold(threshold_method_manual, channels_data[:,:,0], size_mask, image_dim, coordinates[0,:]) 
     
     # List to collect radii for distribution plot
     all_refined_radii = []
 
-
 #----------------------------------------------------------------
 
 #--------------------------- MAIN (PARALLEL) --------------------
     
-    print(f"Starting parallel processing with n_jobs={n_jobs}...")
+    print(f"Starting parallel processing for {num_vesicles} vesicles (n_jobs={n_jobs})...")
 
     # Run processing in parallel
-    # This replaces the loop "for i in range(num_vesicles):"
     results = Parallel(n_jobs=n_jobs)(
         delayed(skl.process_single_vesicle)(
             coordinates[i,:], channels_data, image_dim, parameters_profiles, 
@@ -124,16 +123,20 @@ for s in range(num_sets):
         ) for i in range(num_vesicles)
     )
 
-    # Collect results and write to CSV sequentially (to avoid file locks)
+    # Collect results and write to CSV sequentially
     print("Saving results...")
+    
+    # We open in 'append' mode ('a') because create_output_file already wrote the header
     with open(output_csv_path, "a", newline='') as output_file:
         writer = csv.writer(output_file)
         
         for row, refined_radius in results:
             writer.writerow(row)
-            if refined_radius is not None:
+            if refined_radius is not None and refined_radius > 0:
                 all_refined_radii.append(refined_radius)
 
     # Plot Size Distribution
     skl.plot_size_distribution(all_refined_radii, final_output_path)
-    print("Done!")
+    print("Done with set!")
+
+print("All sets processed.")

@@ -6,9 +6,8 @@ Contains all necessary functions for the GUV analysis pipeline.
 Updated to include:
 - Automatic pixel size detection (tifffile)
 - Robust localization calculation (np.max)
-- Actin cortical thickness and density metrics
+- ADVANCED ACTIN METRICS: ISM, Gini Index, t_cortex
 - Physical unit plotting (microns)
-- FIX: 'Lumenal Actin' logic (Preserves low density, checks peak position for thickness)
 
 @author: kkourkoulou (Updated by Gemini)
 """
@@ -24,14 +23,14 @@ from skimage.filters import try_all_threshold
 from skimage.filters import threshold_li, threshold_otsu, threshold_yen, \
                             threshold_isodata, threshold_mean, threshold_minimum, threshold_triangle
 from skimage.transform import hough_circle, hough_circle_peaks
-from skimage.feature import canny
 
 from scipy import ndimage as nd                                                
 from scipy.signal import find_peaks, peak_widths
-from scipy.ndimage import map_coordinates, gaussian_filter1d               
+from scipy.ndimage import map_coordinates
+from scipy.stats import kurtosis          
 import cv2
 import tifffile  # Required for metadata reading
-
+import warnings  # Ensure warnings is available globally
 
 def find_projects_info(path_membrane):
     """
@@ -107,9 +106,8 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
                 # If unit is cm (3), convert to um. Res is px/unit. Size = 1/Res.
                 if tif.pages[0].tags.get('ResolutionUnit').value == 3: #
                     pixel_size = 10000.0 / (x_res[0]/x_res[1])
-                # Note: If unit is 'Inch' or 'None', logic may vary, keeping default
     except:
-        print(f"Warning: Could not detect pixel size for {file_stem}. Using 1.0.")
+        print(f"Warning: Could not detect pixel size for {file_stem}. Using default {pixel_size}.")
     
     print(f"Processing: {file_stem} (Pixel Size: {pixel_size:.4f} um)")
     
@@ -128,6 +126,10 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
             channels_data = np.dstack((channels_data, plt.imread(c3_path)))
         else:
             print(f"Warning: Actin file not found at {c3_path}")
+            
+    # SAFETY: Ensure channels_data is 3D even if only one channel exists
+    if channels_data.ndim == 2:
+        channels_data = channels_data[:, :, np.newaxis]
     
     # 4. Read Detected Vesicles CSV
     csv_path = os.path.join(path_detected, file_stem + "-detected_vesicles.csv")
@@ -148,17 +150,20 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
 def create_output_file(final_output_path, proteins_present):
     """
     Creates an empty output CSV file in the specific folder.
-    UPDATED: Added headers for new metrics (t_cortex, rho_actin, uniformity, refined radius).
+    UPDATED: Headers now include ISM, Gini, and t_cortex.
     """
     protein_status = plot_format(proteins_present)
     
     base_headers = ["Date","Name", "Image", "Vesicle id", "xc", "yc", "Radius"]
     
+    # Default fallback
+    specific_headers = ["M Background"]
+
     if protein_status == "both_proteins":
         specific_headers = ["M Background", "S Background", "A Background", 
                             "S localization", "A localization", 
-                            "t_cortex", "rho_actin", "uniformity", 
-                            "Refined Radius (um)", "Comment"] 
+                            "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
+                            "Refined Radius (um)", "Comment"]
 
     if protein_status == "only_septin":
         specific_headers = ["M Background", "S Background", "S localization", 
@@ -166,8 +171,8 @@ def create_output_file(final_output_path, proteins_present):
 
     if protein_status == "only_actin":
         specific_headers = ["M Background", "A Background", "A localization", 
-                            "t_cortex", "rho_actin", "uniformity", 
-                            "Refined Radius (um)", "Comment"] 
+                            "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
+                            "Refined Radius (um)", "Comment"]
 
     column_headers = base_headers + specific_headers
 
@@ -355,7 +360,7 @@ def linear_profiles(channels_data, ves_coordinates, image_dim, parameters_profil
     """
     Calculation of the multiple linear profiles for a single vesicle.
     """
-    num_channels   = len(channels_data[0,0,:])
+    num_channels   = channels_data.shape[2]
     xc             = ves_coordinates[1]
     yc             = ves_coordinates[2]
     radius         = ves_coordinates[3]
@@ -445,7 +450,7 @@ def background_noise(plot_mask, channels_data, proteins_present, size_mask, imag
     """
     Calculation of the background noise.
     """
-    num_channels     = len(channels_data[0,0,:])
+    num_channels     = channels_data.shape[2]
     size_box = int(size_mask * ves_coordinates[3])
 
     vesicle_box = np.zeros((2*size_box, 2*size_box, num_channels))
@@ -772,77 +777,124 @@ def angular_profile(num_channels, intensity_profiles, index_border_in, index_bor
 
 def localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, radius, size_central_area, pixels_to_remove):
     """
-    Quantification of the protein localization on the membrane.
-    FIXED: Prevents divide-by-zero errors when median intensity is 0.
+    Robust quantification of protein localization.
+    Includes gates for Empty GUVs (Noise Threshold) and Lumenal Actin (Peak Topology).
     """
     comment = []
     num_proteins = num_channels - 1 
-    index_centre = int(size_central_area * (radius-pixels_to_remove)) 
-    localization = np.zeros(num_proteins)
- 
-    for i in range(num_proteins):
-        if np.mean(angular_profiles[:,i+1]) > 0:
-            rsd = np.std(angular_profiles[:,i+1]) / np.mean(angular_profiles[:,i+1])
-            if rsd > 0.8:
-                comment = ["high_rsd"]
-        
-        median = np.median(angular_profiles[:,i+1])
-        centre = np.average(radial_profiles[0:index_centre,i+1]) 
-        
-        # FIX: Check if median is valid to avoid RuntimeWarning: divide by zero
-        if median > 0.001:
-            localization[i] = np.clip((median - centre)/median, 0, None)
-        else:
-            localization[i] = 0.0 # No signal on membrane = No localization
     
-    return localization, comment
+    # 1. Define Regions
+    # "Deep Lumen" for the contrast ratio (center of vesicle)
+    index_centre = int(size_central_area * (radius - pixels_to_remove)) 
+    localization_res = np.zeros(num_proteins)
+ 
+    # --- GATING PARAMETERS ---
+    NOISE_FLOOR = 4.0            # Absolute minimum intensity
+    MIN_Z_SCORE = 3.0            # Peak must be 3-sigma above lumen noise
+    
+    for i in range(num_proteins):
+        prot_idx = i + 1
+        
+        # 1. Get Membrane Signal
+        memb_angular = angular_profiles[:, prot_idx]
+        median_memb = np.median(memb_angular)
+        
+        # 2. Get Lumen Statistics (Signal & Noise)
+        lumen_radial = radial_profiles[0:index_centre, prot_idx]
+        mu_lumen = np.mean(lumen_radial)
+        sigma_lumen = np.std(lumen_radial)
+        
+        # Avoid divide-by-zero if lumen is perfectly flat (synthetic data)
+        if sigma_lumen < 0.001: sigma_lumen = 0.1 
+
+        # --- GATE 1: ABSOLUTE NOISE FLOOR ---
+        if median_memb < NOISE_FLOOR:
+            localization_res[i] = 0.0
+            continue 
+
+        # --- GATE 2: STATISTICAL SNR (Z-SCORE) ---
+        # Calculate Peak Intensity in the border region
+        b_in = max(0, int(index_border_in))
+        b_out = min(len(radial_profiles), int(index_border_out))
+        
+        if b_in < b_out:
+            peak_intensity = np.max(radial_profiles[b_in:b_out, prot_idx])
+        else:
+            peak_intensity = median_memb
+
+        # THE METRIC: How many standard deviations is the peak above the lumen?
+        z_score = (peak_intensity - mu_lumen) / sigma_lumen
+        
+        if z_score < MIN_Z_SCORE:
+             # Peak is buried in noise (not statistically significant)
+             localization_res[i] = 0.0
+             comment.append(f"low_SNR_z{z_score:.1f}")
+        else:
+             # Peak is real
+             if median_memb > 0.001:
+                 score = (median_memb - mu_lumen) / median_memb
+                 localization_res[i] = np.clip(score, 0, None)
+             else:
+                 localization_res[i] = 0.0
+    
+    return localization_res, comment
 
 
 def analyze_actin_structure(radial_profiles, angular_profiles, localization_score, protein_channel_index, px_size=1.0, border_in=0, border_out=0):
     """
-    Calculates actin cortex properties.
-    FIXED: Calculates Density (rho) for ALL vesicles (including Lumenal Actin).
-    Only calculates Thickness (t_cortex) if localization is significant AND peak is at border.
+    Calculates advanced physical descriptors:
+    1. Gini (Clustering)
+    2. ISM (Mass)
+    3. T_Cortex (Thickness)
+    4. Radial Kurtosis (Sharpness) -> NEW
     """
-    # Initialize defaults
-    t_cortex, rho_actin, uniformity = 0.0, 0.0, 0.0
+    t_cortex, ism, gini, rad_kurtosis = 0.0, 0.0, 0.0, 0.0
     
-    # --- 1. ALWAYS Calculate Density (rho_actin) ---
-    # Density exists regardless of where the actin is (lumen or cortex)
+    # If localization is 0 (empty GUV), return zeros
+    if localization_score <= 0.0:
+        return t_cortex, ism, gini, rad_kurtosis
+        
     actin_angular = angular_profiles[:, protein_channel_index]
-    rho_actin = np.mean(actin_angular)
+    actin_radial = radial_profiles[:, protein_channel_index]
     
-    # --- 2. Calculate Uniformity (CV) ---
-    if rho_actin > 0:
-        stdev = np.std(actin_angular)
-        uniformity = stdev / rho_actin
+    # 1. Gini Coefficient (Clustering)
+    noise_floor = np.percentile(actin_angular, 10)
+    actin_angular_corrected = np.clip(actin_angular - noise_floor, 0, None)
+    
+    sorted_angular = np.sort(actin_angular_corrected)
+    n = len(sorted_angular)
+    if np.mean(sorted_angular) > 0:
+        index = np.arange(1, n + 1)
+        gini = (np.sum((2 * index - n - 1) * sorted_angular)) / (n * np.sum(sorted_angular))
+    
+    # 2. Integrated Surface Mass (ISM)
+    if border_out > border_in:
+        r_indices = np.arange(border_in, border_out)
+        ring_areas = 2 * np.pi * r_indices * px_size 
+        limit = min(len(actin_radial), len(ring_areas) + border_in)
+        ism = np.sum(actin_radial[border_in:limit] * ring_areas[:limit-border_in])
 
-    # --- 3. Conditionally Calculate Thickness (t_cortex) ---
-    # Only try to measure thickness if there is actually a cortex (Localization > 0.2)
+    # 3. Radial Kurtosis (Sharpness)
+    if np.max(actin_radial) > 0:
+        # Define a window around the border (e.g., border +/- 5 pixels)
+        slice_start = max(0, border_in - 5)
+        slice_end = min(len(actin_radial), border_out + 5)
+        
+        cortex_segment = actin_radial[slice_start:slice_end]
+        
+        if len(cortex_segment) > 3:
+            # Fisher's definition (Normal = 0.0)
+            rad_kurtosis = kurtosis(cortex_segment)
+
+    # 4. Cortical Thickness (FWHM)
     if localization_score >= 0.2:
-        
-        actin_radial = radial_profiles[:, protein_channel_index]
-        
-        # Find peaks in the actin channel
-        peaks, properties = find_peaks(actin_radial, height=np.max(actin_radial)*0.5)
-        
+        peaks, _ = find_peaks(actin_radial, height=np.max(actin_radial)*0.5)
         if len(peaks) > 0:
-            # Find the tallest peak
-            tallest_peak_idx = np.argmax(actin_radial[peaks])
-            peak_pos = peaks[tallest_peak_idx]
-            
-            # SPATIAL CHECK: Is the peak inside the membrane region?
-            # We allow a small buffer (e.g. +/- 2 pixels)
-            if (peak_pos >= border_in - 2) and (peak_pos <= border_out + 2):
-                
-                # Calculate FWHM (rel_height=0.5)
-                widths, width_heights, left_ips, right_ips = peak_widths(actin_radial, peaks, rel_height=0.5)
-                
-                # Get width of the tallest peak
-                t_cortex_px = widths[tallest_peak_idx]
-                t_cortex = t_cortex_px * px_size
+            idx = np.argmax(actin_radial[peaks])
+            widths, _, _, _ = peak_widths(actin_radial, peaks, rel_height=0.5)
+            t_cortex = widths[idx] * px_size
 
-    return t_cortex, rho_actin, uniformity
+    return t_cortex, ism, gini, rad_kurtosis
 
 
 def plot_debug_overlay(ves_coordinates, radius, index_border_in, index_border_out, 
@@ -896,7 +948,7 @@ def plot_intensity_profiles(plot_intensity_profiles, proteins_present, parameter
     """
     if plot_intensity_profiles == True:
         
-        num_channels     = len(channels_data[0,0,:])
+        num_channels     = channels_data.shape[2]
         size_box = int(parameters_sizes[1] * ves_coordinates[3])
 
         image_box = np.zeros((2*size_box, 2*size_box, num_channels))
@@ -1082,7 +1134,7 @@ def plot_size_distribution(refined_radii_um, path_to_output):
     plt.savefig(os.path.join(path_to_output, "Size_Distribution_Refined.png"))
     plt.close()
 
-def format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment):
+def format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment):
     """
     Prepares the data row for the CSV file.
     Does NOT write to file.
@@ -1094,7 +1146,8 @@ def format_result_row(exp_info, ves_coordinates, background, localization, t_cor
 
     # Create list of structure metrics (Handle if None)
     if t_cortex is not None:
-        list_structure = [round(float(t_cortex), 3), round(float(rho_actin), 3), round(float(uniformity), 3)]
+        list_structure = [round(float(t_cortex), 3), round(float(ism), 3), 
+                          round(float(gini), 3), round(float(rad_kurtosis), 3)]
     else:
         list_structure = [] 
         
@@ -1104,17 +1157,16 @@ def format_result_row(exp_info, ves_coordinates, background, localization, t_cor
     vesicle_row = list_exp_info + list_ves_coordinates + list_background + list_localization + list_structure + radius_val + comment
     return vesicle_row
 
-def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment):
+def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, t_cortex, ism, gini, refined_radius_um, comment):
     """
     Original function maintained for backward compatibility.
     Calls format_result_row then writes to file immediately.
     """
-    row = format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, rho_actin, uniformity, refined_radius_um, comment)
+    row = format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, ism, gini, refined_radius_um, comment)
     with open(os.path.join(final_output_path, "Analysis_Results.csv"), "a", newline='') as output_file:
         writer = csv.writer(output_file)
         writer.writerow(row)
 
-import warnings # Add this import at the top of skeleton.py if not present
 
 def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters_profiles, 
                            proteins_present, size_mask, threshold_membrane, final_output_path, 
@@ -1139,7 +1191,8 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
         background = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels-1)
         comment = ["margins"]
-        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, 0, comment)
+        # FIX: Added None for rad_kurtosis
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, 0, comment)
         return row, None
 
     # 2. Background
@@ -1167,7 +1220,8 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
          background = np.zeros((1, num_channels))
          localization_val = np.zeros(num_channels-1)
          comment = comment_peak
-         row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, refined_radius_um, comment)
+         # FIX: Added None for rad_kurtosis
+         row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, refined_radius_um, comment)
          plt.close('all') # Cleanup
          return row, refined_radius_um
 
@@ -1188,7 +1242,8 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
         comment_str = [', '.join(comment)]
         background = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels-1)
-        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, refined_radius_um, comment_str)
+        # FIX: Added None for rad_kurtosis
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, refined_radius_um, comment_str)
         plt.close('all') # Cleanup
         return row, refined_radius_um
 
@@ -1200,16 +1255,9 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
     actin_idx = num_channels - 1
     loc_actin_score = localization_val[-1]
     
-    # FIX: Pass the border indices to analyze_actin_structure
-    t_cortex, rho_actin, uniformity = analyze_actin_structure(radial_profiles, angular_profiles, loc_actin_score, actin_idx, pixel_size, index_border_in, index_border_out)
+    # FIX: Correctly unpack 4 values
+    t_cortex, ism, gini, rad_kurtosis = analyze_actin_structure(radial_profiles, angular_profiles, loc_actin_score, actin_idx, pixel_size, index_border_in, index_border_out)
     
-    # --- FILTER EMPTY VESICLES (DISABLED) ---
-    # We disable this so we can distinguish Empty vs Lumenal downstream
-    # if rho_actin < 2.0:
-    #     comment.append("empty_vesicle")
-    #     localization_val[-1] = 0.0
-    # ----------------------------------
-
     # Final comments
     if np.isnan(localization_val).any(): comment.append("no_memb_detected")
     elif np.isinf(localization_val).any(): comment.append("zero_at_centre")
@@ -1218,11 +1266,10 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
     # Plotting
     plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_sizes, channels_data, ves_coordinates, image_dim, along_radius, theta, radial_profiles, angular_profiles, index_border_in, index_border_out, background, localization_val, final_output_path, exp_info, pixel_size)
     
-    # FIX: Force close all figures created in this thread to prevent memory warning
     plt.close('all')
 
-    # Format Row
+    # FIX: Correctly pass rad_kurtosis to format_result_row
     comment_final = [', '.join(comment)] if comment else ["OK"]
-    row = format_result_row(exp_info, ves_coordinates, background, localization_val, t_cortex, rho_actin, uniformity, refined_radius_um, comment_final)
+    row = format_result_row(exp_info, ves_coordinates, background, localization_val, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment_final)
     
     return row, refined_radius_um

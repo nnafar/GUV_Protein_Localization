@@ -12,57 +12,85 @@ import plotting
 # =============================================================================
 
 def categorize_vesicles(df):
-    """Classifies vesicles based on the decision tree."""
+    """Classifies vesicles using a Size-Dependent Thickness criterion with a Buffer Zone."""
     
-    # Threshold Constants
-    NO_LOC_LIMIT = 0.4          # Below this is Empty/Lumenal
-    SPARSE_LOC_LIMIT = 0.5       # Below this (but >0.4) is Fuzzy
-    PATCHY_LOC_LIMIT = 0.65     # Below this (but >0.5) is Patchy
+    # --- CONSTANTS ---
+    NO_LOC_LIMIT = 0.4
+    SPARSE_LOC_LIMIT = 0.5
+    PATCHY_LOC_LIMIT = 0.65
     
-    RHO_LIMIT = 2               # Distinguishes Empty vs Lumenal Actin
-    THICKNESS_LIMIT = 1.6       # Used to exclude out-of-focus Sparse vesicles
-    UNIFORMITY_LIMIT = 0.4      # New check: separates true Uniform from Patchy
+    RHO_LIMIT = 2
+    UNIFORMITY_LIMIT = 0.4
+    SPARSE_MAX_THICK = 1.6  # RESTORED: General limit for sparse signal
     
+    # --- SIZE-DEPENDENT LOGIC CONSTANTS ---
+    BUFFER_MIN = 2.2         # Lower bound of intermediate size zone
+    BUFFER_MAX = 2.8         # Upper bound of intermediate size zone
+    STRICT_THICK_LIMIT = 1.2 # Limit for SMALL vesicles (< 2.2 um)
+    RELAXED_THICK_LIMIT = 1.6 # Limit for LARGE vesicles (> 2.8 um)
+
     def classify(row):
+        cat = str(row['Category'])
         loc = row['A localization']
         rho = row['rho_actin']
         thick = row['t_cortex']
         cv = row['uniformity']
+        rad = row['Refined Radius (um)']
         
         # 1. Base Exclusion
         if pd.isna(loc) or pd.isna(rho) or pd.isna(thick):
             return "Excluded"
-        
-        # 2. Low Localization Branch (loc < 0.4)
+            
+        # 2. Low Localization (< 0.4)
         if loc < NO_LOC_LIMIT:
-            if rho < RHO_LIMIT: return "Empty"
-            else: return "Lumenal Actin"
+            return "Empty" if rho < RHO_LIMIT else "Lumenal Actin"
             
-        # 3. Sparse Branch (0.4 <= loc < 0.5)
+        # 3. Sparse Branch (0.4 - 0.5)
         if loc < SPARSE_LOC_LIMIT:
-            # EXCLUSION RULE: If Sparse AND thick (>1.2), it's out-of-focus -> Exclude
-            if thick > THICKNESS_LIMIT:
+            # RESTORED: Original Sparse Thickness Guardrail
+            if thick > SPARSE_MAX_THICK:
                 return "Excluded"
-            else:
-                return "Sparse"
             
-        # 4. Cortex Branch (loc >= 0.5)
-        
-        # A. Mid Localization (0.5 - 0.65) -> Always Patchy
+            if thick == 0.0:
+                return "Lumenal Actin"
+                
+            return "Sparse"
+            
+        # 4. Patchy/Cortex Branch (0.5 - 0.65)
         if loc < PATCHY_LOC_LIMIT:
-            return "Patchy"
+            if thick == 0.0:
+                return "Lumenal Actin"
             
-        # B. High Localization (> 0.65) -> Check Uniformity
-        else:
-            if pd.isna(cv): return "Patchy" # Fallback if cv is missing
+            # --- BRANCHED RULE (Size Dependent) ---
+            if "Branched" in cat:
+                # 4a. Identify ambiguous cases first
+                if BUFFER_MIN <= rad <= BUFFER_MAX:
+                    return "Intermediate"
+                
+                # 4b. Assign dynamic limits for non-ambiguous cases
+                if rad < BUFFER_MIN:
+                    max_allowed = STRICT_THICK_LIMIT
+                else:
+                    max_allowed = RELAXED_THICK_LIMIT
+                
+                # Check against the dynamic limit
+                if thick > max_allowed:
+                    return "Excluded"
+                return "Patchy"
             
-            if cv < UNIFORMITY_LIMIT:
-                return "Uniform"
+            # --- LINEAR RULE ---
             else:
-                return "Patchy" # High loc, but not uniform enough
+                # RESTORED: Linear filaments can be thicker than branched ones
+                return "Patchy"
+
+        # 5. High Localization (> 0.65)
+        else:
+            if pd.isna(cv): return "Patchy"
+            return "Uniform" if cv < UNIFORMITY_LIMIT else "Patchy"
 
     df['Phenotype_Category'] = df.apply(classify, axis=1)
     return df
+
 
 def save_phenotype_statistics(df, output_dir):
     """Calculates summary stats for phenotypes."""
@@ -251,11 +279,23 @@ def plot_pairgrid(df, output_dir, filename_suffix=""):
 def run_phenotype_analysis(df, output_dir):
     print("\n--- Running Phenotype & Cortex Analysis (Category Split) ---")
     plotting.set_paper_style() 
-
+    
+    # 1. Run Classification Logic
     df = categorize_vesicles(df)
     
-    # 1. Composition Plot (Global)
-    plotting.plot_phenotype_composition(df, 'Category', 'Phenotype_Category', output_dir, 'Phenotype_Composition_Stacked.png')
+    # 1a. Save classification csv
+    detailed_path = os.path.join(output_dir, "Vesicle_Phenotype_Assignments.csv")
+    df.to_csv(detailed_path, index=False)
+    print(f"      -> Detailed Assignments saved: {detailed_path}")
+    
+    # 1b. Composition Plot (Stacked Bar Chart)
+    plotting.plot_phenotype_composition(
+        df, 
+        'Category', 
+        'Phenotype_Category', 
+        output_dir, 
+        'Phenotype_Composition_Stacked.png'
+    )
     
     # 2. Comparison Panel (X-Axis = Category)
     generate_category_panel(df, output_dir)
