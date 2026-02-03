@@ -8,6 +8,9 @@ Updated to include:
 - Robust localization calculation (np.max)
 - ADVANCED ACTIN METRICS: ISM, Gini Index, t_cortex
 - Physical unit plotting (microns)
+- GEOMETRIC GATING: Excludes 'wide_peak' artifacts automatically
+- FIX: Defensive directory creation to prevent FileNotFoundError on network drives
+- FIX: Proper NaN handling for excluded vesicles to maintain CSV alignment
 
 @author: kkourkoulou (Updated by Gemini)
 """
@@ -94,6 +97,7 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
     
     # --- Detect Pixel Size ---
     pixel_size = 0.07 # Default fallback
+   
     try:
         with tifffile.TiffFile(c1_path) as tif:
             # Check ImageJ metadata (common for Fiji exports)
@@ -162,6 +166,7 @@ def create_output_file(final_output_path, proteins_present):
     if protein_status == "both_proteins":
         specific_headers = ["M Background", "S Background", "A Background", 
                             "S localization", "A localization", 
+                            "S Lumen", "A Lumen", "S Lumen/Bg", "A Lumen/Bg",
                             "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
                             "Refined Radius (um)", "Comment"]
 
@@ -171,6 +176,7 @@ def create_output_file(final_output_path, proteins_present):
 
     if protein_status == "only_actin":
         specific_headers = ["M Background", "A Background", "A localization", 
+                            "A Lumen", "A Lumen/Bg",
                             "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
                             "Refined Radius (um)", "Comment"]
 
@@ -227,6 +233,8 @@ def detected_centres(to_plot, num_vesicles, ch_membrane, all_xc, all_yc, final_o
         for i in range(num_vesicles):
             plt.annotate(i+1, (all_xc[i]+5, all_yc[i]-5), c = 'red') 
         
+        # FIX: Ensure directory exists
+        os.makedirs(final_output_path, exist_ok=True)
         plt.savefig(os.path.join(final_output_path, "Overview_Detected_Centres.png"))
 
 
@@ -512,8 +520,11 @@ def show_mask_both(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_
     ax4.set_title('Mask')
     ax4.set_axis_off()
     
+    # FIX: Ensure directory exists
+    os.makedirs(path_to_output, exist_ok=True)
     filename = f"Vesicle_{vesicle_id}_Channels_and_Mask.png"
     fig.savefig(os.path.join(path_to_output, filename))
+    plt.close(fig)
 
     
 def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
@@ -535,8 +546,11 @@ def show_mask_only_sept(vesicle_id, vesicle_box, mask_memb_fill, background, pat
    ax3.set_title('Mask')
    ax3.set_axis_off()
    
+   # FIX: Ensure directory exists
+   os.makedirs(path_to_output, exist_ok=True)
    filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
    fig.savefig(os.path.join(path_to_output, filename))
+   plt.close(fig)
 
 
 def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, path_to_output, exp_info):
@@ -558,8 +572,11 @@ def show_mask_only_actin(vesicle_id, vesicle_box, mask_memb_fill, background, pa
    ax3.set_title('Mask')
    ax3.set_axis_off()
    
+   # FIX: Ensure directory exists
+   os.makedirs(path_to_output, exist_ok=True)
    filename = f"Vesicle_{vesicle_id}-Channels_and_Mask.png"
    fig.savefig(os.path.join(path_to_output, filename))
+   plt.close(fig)
 
 
 def background_correction(num_channels, intensity_profiles, background):
@@ -776,44 +793,34 @@ def angular_profile(num_channels, intensity_profiles, index_border_in, index_bor
 
 
 def localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, radius, size_central_area, pixels_to_remove):
-    """
-    Robust quantification of protein localization.
-    Includes gates for Empty GUVs (Noise Threshold) and Lumenal Actin (Peak Topology).
-    """
     comment = []
     num_proteins = num_channels - 1 
-    
-    # 1. Define Regions
-    # "Deep Lumen" for the contrast ratio (center of vesicle)
     index_centre = int(size_central_area * (radius - pixels_to_remove)) 
     localization_res = np.zeros(num_proteins)
+    lumen_intensity_res = np.zeros(num_proteins) # NEW: Store lumen intensity
  
-    # --- GATING PARAMETERS ---
-    NOISE_FLOOR = 4.0            # Absolute minimum intensity
-    MIN_Z_SCORE = 3.0            # Peak must be 3-sigma above lumen noise
+    NOISE_FLOOR = 4.0            
+    MIN_Z_SCORE = 3.0            
     
     for i in range(num_proteins):
         prot_idx = i + 1
-        
-        # 1. Get Membrane Signal
         memb_angular = angular_profiles[:, prot_idx]
         median_memb = np.median(memb_angular)
         
-        # 2. Get Lumen Statistics (Signal & Noise)
         lumen_radial = radial_profiles[0:index_centre, prot_idx]
         mu_lumen = np.mean(lumen_radial)
         sigma_lumen = np.std(lumen_radial)
         
-        # Avoid divide-by-zero if lumen is perfectly flat (synthetic data)
+        # Store Lumen Intensity
+        lumen_intensity_res[i] = mu_lumen
+
         if sigma_lumen < 0.001: sigma_lumen = 0.1 
 
-        # --- GATE 1: ABSOLUTE NOISE FLOOR ---
+        # ... (Rest of gating logic remains the same) ...
         if median_memb < NOISE_FLOOR:
             localization_res[i] = 0.0
             continue 
 
-        # --- GATE 2: STATISTICAL SNR (Z-SCORE) ---
-        # Calculate Peak Intensity in the border region
         b_in = max(0, int(index_border_in))
         b_out = min(len(radial_profiles), int(index_border_out))
         
@@ -822,22 +829,19 @@ def localization(num_channels, angular_profiles, radial_profiles, index_border_i
         else:
             peak_intensity = median_memb
 
-        # THE METRIC: How many standard deviations is the peak above the lumen?
         z_score = (peak_intensity - mu_lumen) / sigma_lumen
         
         if z_score < MIN_Z_SCORE:
-             # Peak is buried in noise (not statistically significant)
              localization_res[i] = 0.0
              comment.append(f"low_SNR_z{z_score:.1f}")
         else:
-             # Peak is real
              if median_memb > 0.001:
                  score = (median_memb - mu_lumen) / median_memb
                  localization_res[i] = np.clip(score, 0, None)
              else:
                  localization_res[i] = 0.0
     
-    return localization_res, comment
+    return localization_res, lumen_intensity_res, comment
 
 
 def analyze_actin_structure(radial_profiles, angular_profiles, localization_score, protein_channel_index, px_size=1.0, border_in=0, border_out=0):
@@ -937,6 +941,8 @@ def plot_debug_overlay(ves_coordinates, radius, index_border_in, index_border_ou
     ax.legend(loc='upper right', fontsize='small')
     ax.axis('off')
     
+    # FIX: Ensure directory exists
+    os.makedirs(final_output_path, exist_ok=True)
     fig.savefig(os.path.join(final_output_path, f"Vesicle_{int(ves_coordinates[0])}_DEBUG.png"))
     plt.close(fig)
 
@@ -1009,6 +1015,8 @@ def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius, thet
     axes["E"].text(-0.2,-0.2,"Localization A :  " + str(round(localization[1],3)), size = 10)
     axes["E"].set_axis_off()
     
+    # FIX: Ensure directory exists
+    os.makedirs(path_to_output, exist_ok=True)
     filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
     fig.savefig(os.path.join(path_to_output, filename))
     
@@ -1096,10 +1104,11 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["B"].imshow(image_box[:,:,0], cmap = "cmap_cyan"); axes["B"].set_axis_off()
     axes["C"].imshow(image_box[:,:,1], cmap = "cmap_yellow"); axes["C"].set_axis_off()
     axes["D"].text(-0.2,0.7,"Background M:  " + str(round(background[0,0],4)), size = 10)
-    axes["D"].text(-0.2,0.5,"Background A:   " + str(round(background[0,1],4)), size = 10)
     axes["D"].text(-0.2,0.0,"Localization A :  " + str(round(localization[0],3)), size = 10)
     axes["D"].set_axis_off()
     
+    # FIX: Ensure directory exists
+    os.makedirs(path_to_output, exist_ok=True)
     filename = f"Vesicle_{vesicle_id}-Int_prof_Radial.png"
     fig.savefig(os.path.join(path_to_output, filename))
     
@@ -1131,10 +1140,12 @@ def plot_size_distribution(refined_radii_um, path_to_output):
     plt.ylabel("Count")
     plt.grid(axis='y', alpha=0.3)
     
+    # FIX: Ensure directory exists
+    os.makedirs(path_to_output, exist_ok=True)
     plt.savefig(os.path.join(path_to_output, "Size_Distribution_Refined.png"))
     plt.close()
 
-def format_result_row(exp_info, ves_coordinates, background, localization, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment):
+def format_result_row(exp_info, ves_coordinates, background, localization, lumen_intensity, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment):
     """
     Prepares the data row for the CSV file.
     Does NOT write to file.
@@ -1143,18 +1154,29 @@ def format_result_row(exp_info, ves_coordinates, background, localization, t_cor
     list_ves_coordinates = list(ves_coordinates)
     list_background      = list(background[0,:])
     list_localization    = list(localization)
+    list_lumen_data = []
+    num_proteins = len(localization)
 
-    # Create list of structure metrics (Handle if None)
+    for i in range(num_proteins):
+        lumen_val = lumen_intensity[i]
+        bg_val = background[0, i+1] # Skip membrane background (index 0)
+        
+        ratio = lumen_val / bg_val if bg_val > 0 else 0
+        
+        list_lumen_data.append(round(float(lumen_val), 3))
+        list_lumen_data.append(round(float(ratio), 3))
+
     if t_cortex is not None:
         list_structure = [round(float(t_cortex), 3), round(float(ism), 3), 
                           round(float(gini), 3), round(float(rad_kurtosis), 3)]
     else:
-        list_structure = [] 
+        # FIX: Fill with NaN to maintain column alignment
+        list_structure = [np.nan, np.nan, np.nan, np.nan] 
         
-    # Handle refined radius
     radius_val = [round(float(refined_radius_um), 3)] if refined_radius_um else [0]
-
-    vesicle_row = list_exp_info + list_ves_coordinates + list_background + list_localization + list_structure + radius_val + comment
+    
+    # Insert list_lumen_data between localization and structure
+    vesicle_row = list_exp_info + list_ves_coordinates + list_background + list_localization + list_lumen_data + list_structure + radius_val + comment
     return vesicle_row
 
 def edit_output(final_output_path, exp_info, ves_coordinates, background, localization, t_cortex, ism, gini, refined_radius_um, comment):
@@ -1190,9 +1212,10 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
     if death_mark:
         background = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels-1)
+        lumen_val = np.zeros(num_channels-1)
         comment = ["margins"]
-        # FIX: Added None for rad_kurtosis
-        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, 0, comment)
+        # Pass None for structural metrics
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, lumen_val, None, None, None, None, 0, comment)
         return row, None
 
     # 2. Background
@@ -1216,13 +1239,28 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
     # Debug Plot 
     plot_debug_overlay(ves_coordinates, ves_coordinates[3], index_border_in, index_border_out, image_dim, channels_data, along_radius, theta, final_output_path)
     
+    # --- GATE 1+2: GEOMETRIC EXCLUSION (Wide Peaks) and SIZE EXCLUSION (Small Debris) ---
+    MIN_RADIUS_UM = 3.0
+    if "wide_peak" in comment_peak or (refined_radius_um < MIN_RADIUS_UM):
+         background = np.zeros((1, num_channels))
+         localization_val = np.zeros(num_channels-1)
+         lumen_val = np.zeros(num_channels-1) 
+         
+         reason = "too_small" if refined_radius_um < MIN_RADIUS_UM else "wide_peak"
+         if reason not in comment: comment.append(reason)
+         
+         # Force excluded metrics to None (which format_result_row will convert to NaN)
+         row = format_result_row(exp_info, ves_coordinates, background, localization_val, lumen_val, None, None, None, None, refined_radius_um, comment)
+         plt.close('all') 
+         return row, refined_radius_um
+
     if death_mark_peak:
          background = np.zeros((1, num_channels))
          localization_val = np.zeros(num_channels-1)
          comment = comment_peak
-         # FIX: Added None for rad_kurtosis
-         row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, refined_radius_um, comment)
-         plt.close('all') # Cleanup
+         # Pass None for structural metrics
+         row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, None, refined_radius_um, comment)
+         plt.close('all') 
          return row, refined_radius_um
 
     # Low signal check
@@ -1242,14 +1280,14 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
         comment_str = [', '.join(comment)]
         background = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels-1)
-        # FIX: Added None for rad_kurtosis
-        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, refined_radius_um, comment_str)
+        # Pass None for structural metrics
+        row = format_result_row(exp_info, ves_coordinates, background, localization_val, None, None, None, None, None, refined_radius_um, comment_str)
         plt.close('all') # Cleanup
         return row, refined_radius_um
 
     # 6. Localization
     size_central_area = parameters_sizes[2] 
-    localization_val, comment_loc = localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, ves_coordinates[3], size_central_area, pixels_to_remove)
+    localization_val, lumen_val, comment_loc = localization(num_channels, angular_profiles, radial_profiles, index_border_in, index_border_out, ves_coordinates[3], size_central_area, pixels_to_remove)
     
     # 7. Actin Structure
     actin_idx = num_channels - 1
@@ -1270,6 +1308,6 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim, parameters
 
     # FIX: Correctly pass rad_kurtosis to format_result_row
     comment_final = [', '.join(comment)] if comment else ["OK"]
-    row = format_result_row(exp_info, ves_coordinates, background, localization_val, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment_final)
+    row = format_result_row(exp_info, ves_coordinates, background, localization_val, lumen_val, t_cortex, ism, gini, rad_kurtosis, refined_radius_um, comment_final)
     
     return row, refined_radius_um
