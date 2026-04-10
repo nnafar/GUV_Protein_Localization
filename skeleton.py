@@ -87,26 +87,17 @@ def find_projects_info(path_membrane):
 def create_directory_structure(path_to_output_root, exp_info, dataset_name=""):
     """
     Creates a hierarchical folder structure:
-      Root -> Dataset_Name -> Date_Experiment -> Region_ID
-    
-    The dataset_name argument adds an extra folder level so that
-    different experimental datasets never share the same output folder,
-    even if their region names are identical.
+      Root -> Dataset_Name -> Region_ID
     
     Example result:
-      Output/260208_BranchedCortex_1/20260208_BranchedCortex/Region0000/
-      Output/260208_BranchedCortex_2/20260208_BranchedCortex/Region0000/
+      Output/260208_BranchedCortex_1/Region0000/
+      Output/260208_BranchedCortex_2/Region0000/
     """
-    date_experiment = exp_info[0]
-    region_id       = exp_info[1]
+    region_id = exp_info[1]
 
-    # Build the path, inserting dataset_name between the root and the date folder.
-    # os.path.join just glues folder names together with the correct slash for
-    # your operating system — think of it as: root / dataset / date / region
     final_output_path = os.path.join(
         path_to_output_root,
-        dataset_name,          # ← the new level that keeps datasets separate
-        date_experiment,
+        dataset_name,
         region_id
     )
 

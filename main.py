@@ -43,17 +43,17 @@ import os
 # ===========================================================================
 
 ## Specify paths to the directories containing the data:
-path_membrane   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1"
-path_detected   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1\Detected"
+path_membrane   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_3\ImageSequences\C1"
+path_detected   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_3\ImageSequences\C1\Detected"
 path_septin     = r""
-path_actin      = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C3"
+path_actin      = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_3\ImageSequences\C3"
 
 # Where to save all output files and plots:
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
 # A unique name for this specific dataset ↓↓↓
 # Change this every time you point at a different data folder.
-dataset_name = "260316_BranchedCortex_1"  
+dataset_name = "260316_BranchedCortex_3"  
 
 # ===========================================================================
 #  WHICH PROTEINS ARE PRESENT?
