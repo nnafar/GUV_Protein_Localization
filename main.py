@@ -26,10 +26,10 @@ import os
 #------------------------- INPUT --------------------------------
 
 ## Specify paths to the directories containing the data:
-path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1"
-path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C1\Detected"
+path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1"
+path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1\Detected"
 path_septin       = r"" 
-path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\251128_LinearCortex\ImageSequences\C3"
+path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C3"
 
 # Define where you want the output saved 
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
@@ -89,6 +89,10 @@ for s in range(num_sets):
     ## Reading image data:
     # UPDATED: Now unpacks 3 values (data, coords, pixel_size)
     channels_data, coordinates, pixel_size = skl.read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present)
+    
+    if channels_data is None:
+        print(f"    → Skipped (no detection data)\n")
+        continue
     
     ## Creating colormaps
     skl.color_maps()

@@ -35,6 +35,13 @@ import cv2
 import tifffile  # Required for metadata reading
 import warnings  # Ensure warnings is available globally
 
+from guve_shape_analysis import (
+    analyze_vesicle_sectors,
+    calculate_deformability_score,
+    plot_sector_analysis,
+    format_shape_metrics_for_csv
+)
+
 def find_projects_info(path_membrane):
     """
     Finds the experiment information of all the data sets to be analyzed
@@ -96,7 +103,7 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
     channels_data = plt.imread(c1_path)
     
     # --- Detect Pixel Size ---
-    pixel_size = 0.07 # Default fallback
+    pixel_size = 0.09 # Default fallback
    
     try:
         with tifffile.TiffFile(c1_path) as tif:
@@ -137,7 +144,20 @@ def read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, 
     
     # 4. Read Detected Vesicles CSV
     csv_path = os.path.join(path_detected, file_stem + "-detected_vesicles.csv")
-    detected_vesicles = pd.read_csv(csv_path)
+
+    if not os.path.exists(csv_path):
+        print(f" SKIPPING {file_stem}: No detected_vesicles.csv found")
+        return None, None, None
+    
+    try:
+        detected_vesicles = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"  SKIPPING {file_stem}: Error reading CSV")
+        return None, None, None
+    
+    if len(detected_vesicles) == 0:
+        print(f"  SKIPPING {file_stem}: CSV is empty")
+        return None, None, None
     
     # Create coordinates array [ID, xc, yc, radius]
     coordinates = np.zeros((len(detected_vesicles), 4))
@@ -661,7 +681,7 @@ def membrane_detection(radial_profile_memb, radius):
         comment.append("width_calc_failed")
 
     
-    # Quality checks
+    # Quality checks: excludes vesicles with wide membranes rings
     if index_border_out - index_border_in > radius/3: 
         comment.append("wide_peak")
     
@@ -810,13 +830,14 @@ def localization(num_channels, angular_profiles, radial_profiles, index_border_i
         lumen_radial = radial_profiles[0:index_centre, prot_idx]
         mu_lumen = np.mean(lumen_radial)
         sigma_lumen = np.std(lumen_radial)
+        lumen_intensity_res[i] = mu_lumen     
         
         # Store Lumen Intensity
         lumen_intensity_res[i] = mu_lumen
 
         if sigma_lumen < 0.001: sigma_lumen = 0.1 
 
-        # ... (Rest of gating logic remains the same) ...
+
         if median_memb < NOISE_FLOOR:
             localization_res[i] = 0.0
             continue 
@@ -1158,14 +1179,13 @@ def format_result_row(exp_info, ves_coordinates, background, localization, lumen
     num_proteins = len(localization)
 
     for i in range(num_proteins):
-        lumen_val = lumen_intensity[i]
-        bg_val = background[0, i+1] # Skip membrane background (index 0)
-        
+        lumen_val = lumen_intensity[i] # Saves actual lumen intensity
+        bg_val = background[0, i+1]    # Background from that channel
         ratio = lumen_val / bg_val if bg_val > 0 else 0
         
-        list_lumen_data.append(round(float(lumen_val), 3))
-        list_lumen_data.append(round(float(ratio), 3))
-
+        list_lumen_data.append(round(float(lumen_val), 3)) # "A Lumen" column
+        list_lumen_data.append(round(float(ratio), 3))     # "A Lumen/Bg" column
+ 
     if t_cortex is not None:
         list_structure = [round(float(t_cortex), 3), round(float(ism), 3), 
                           round(float(gini), 3), round(float(rad_kurtosis), 3)]
