@@ -1,20 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Nov 15 15:33:44 2022
+main.py
 
-@author: kkourkoulou (Updated by Gemini)
+Main script for GUV protein-localization analysis.
 
-Script to calculate the radial and angular intensity profiles of GUVs 
-encapsulating septin and/or actin and to quantify the corresponding protein
-localization on the vesicle membrane. 
- 
-main.py     :    main file to run the script
-skeleton.py :    file with all necessary functions in main.py
+CHANGES FROM PREVIOUS VERSION:
+-------------------------------
+1. ANALYSIS_CONFIG dictionary added.
+   To tune your analysis, you only need to edit this file.
+
+2. Per-vesicle threshold.
+   Previously a single threshold was computed from the FIRST vesicle
+   and reused for every vesicle in the image. This is unreliable when
+   vesicles vary in brightness.
+   Now each worker thread computes its own threshold from its own
+   vesicle's local image region. The global pre-computation is removed.
+
+   IMPORTANT: threshold_method_manual=True requires interactive input
+   from the user (it shows a plot and asks you to type a choice).
+   Interactive input does NOT work inside a parallel loop.
+   If you set threshold_method_manual=True, you MUST also set n_jobs=1
+   to run sequentially.  The code will warn you if this is not the case.
+
+3. ANALYSIS_CONFIG is passed as an extra argument to
+   process_single_vesicle, which passes it further to the shape
+   analysis functions.
 """
 
 # --- Stop plots from displaying in Spyder ---
 import matplotlib
-matplotlib.use('Agg') 
+matplotlib.use('Agg')
 # --------------------------------------------
 
 import numpy as np
@@ -23,124 +38,279 @@ from joblib import Parallel, delayed
 import csv
 import os
 
-#------------------------- INPUT --------------------------------
+# ===========================================================================
+#  INPUT PATHS
+# ===========================================================================
 
 ## Specify paths to the directories containing the data:
-path_membrane     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1"
-path_detected     = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1\Detected"
-path_septin       = r"" 
-path_actin        = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C3"
+path_membrane   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1"
+path_detected   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C1\Detected"
+path_septin     = r""
+path_actin      = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\1.BranchedCortex\260316_BranchedCortex_1\ImageSequences\C3"
 
-# Define where you want the output saved 
+# Where to save all output files and plots:
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
-## Defining which proteins are present (True) or absent (False):
-Septin            = False       
-Actin             = True
+# A unique name for this specific dataset ↓↓↓
+# Change this every time you point at a different data folder.
+dataset_name = "260316_BranchedCortex_1"  
 
-## Defining parameter values for the analysis:
-num_angles        = 360            # number of different equally-spaced linear profiles to be taken into account for a single vesicle
-length_excess     = 1.2            # the length (unit of measure: each vesicles' radius) of the linear profiles to be considered
-dr                = 1              # the step (in px) between the points sampled along the radial direction for the linear profiles calculation  
-size_mask         = 3              # the length (unit of measure: each vesicles' radius) of the side of the square zoomed-in image, centered at each vesicle, to be considered during background signal calculation
-size_view         = length_excess  # the length (unit of measure: each vesicles' radius) of the side of the square zoomed-in image, centered at each vesicle, used for visual inspection along the final results
-size_central_area = 1/4            # the central area radius (unit of measure: each vesicles' radius) considered during localization quantification
+# ===========================================================================
+#  WHICH PROTEINS ARE PRESENT?
+# ===========================================================================
 
-## Deciding on optional output:
-plot_detected_centres   = True     # for inspection of the whole region and the positions of the detected vesicles
-threshold_method_manual = False    # for manual selection of the threshold method for the background signal calculation (default: Li threshold)  
-plot_mask               = False    # for visual inspection of the calculated masks for the background signal calculation
-plot_int_profiles       = True     # for plotting the radial and angular intensity profiles
+Septin = False
+Actin  = True
 
-## PARALLEL PROCESSING SETTINGS
-n_jobs = -1  # -1 means use all available CPUs. Set to 1 for standard sequential processing.
+# ===========================================================================
+#  ANALYSIS CONFIGURATION
+# ===========================================================================
+# All tunable parameters in one place.
+# Change values here; the rest of the code reads them automatically.
+# -----------------------------------------------------------------------------
 
-#----------------------------------------------------------------
+ANALYSIS_CONFIG = {
 
-#------------------------ PREPARATION ---------------------------
-## Rearranging input:
-proteins_present    = np.array((Septin, Actin), dtype = bool)
+    # ------------------------------------------------------------------
+    # PROFILE EXTRACTION
+    # ------------------------------------------------------------------
 
-# NOTE: skeleton.py expects these as Arrays to use index access (e.g. parameters[0])
-parameters_profiles = np.array((num_angles, length_excess, dr))
-parameters_sizes    = np.array((size_mask, size_view, size_central_area))
+    # Number of angular directions to sample around each vesicle.
+    # 360 = one profile per degree (good balance of speed and detail).
+    'num_angles': 360,
 
-## Finding experiment and image information by scanning the Membrane (C1) folder:
-exp_info_all_sets   = skl.find_projects_info(path_membrane)
+    # How far out (relative to each vesicle's radius) to extend the
+    # radial profiles.  1.2 = profiles go 20% beyond the membrane.
+    'length_excess': 1.2,
 
-# Handle case where only 1 set is found (ensure 2D array)
+    # Step size between sample points along the radial direction (pixels).
+    # dr=1 means sample every pixel. dr=2 would halve the array length.
+    'dr': 1,
+
+    # How large a square region (in units of the vesicle radius) to use
+    # when estimating background signal outside the membrane.
+    'size_mask': 3,
+
+    # How large a square region to use when plotting the zoomed vesicle view.
+    # Kept equal to length_excess so the plot matches the profile extent.
+    'size_view': 1.2,   # keep equal to length_excess
+
+    # Radius of the central lumen area (in units of the vesicle radius)
+    # used when computing how much protein is inside vs on the membrane.
+    'size_central_area': 0.25,   # = 1/4 of radius
+
+    # Remove this many pixels at the very centre of each radial profile
+    # before analysis.  The centre is often artificially bright due to
+    # interpolation artefacts in map_coordinates.
+    'pixels_to_remove_centre': 2,
+
+    # ------------------------------------------------------------------
+    # VESICLE FILTERING
+    # ------------------------------------------------------------------
+
+    # Vesicles with a refined radius smaller than this (in µm) are treated
+    # as debris or detection errors and excluded from analysis.
+    'min_vesicle_radius_um': 2.5,
+
+    # ------------------------------------------------------------------
+    # BACKGROUND THRESHOLD
+    # ------------------------------------------------------------------
+
+    # False = automatic Li threshold, computed separately for each vesicle
+    #         from that vesicle's own local image region.  Safe for parallel.
+    # True  = interactive: shows a plot of threshold methods and asks you to
+    #         type a choice.  *** REQUIRES n_jobs = 1 (see below) ***
+    'threshold_method_manual': False,
+
+    # ------------------------------------------------------------------
+    # SHAPE ANALYSIS — sector-based
+    # ------------------------------------------------------------------
+
+    # Number of pie-slice sectors to cut the vesicle into.
+    # More sectors = finer spatial resolution, but noisier.
+    # 8 is a good default.
+    'num_sectors': 8,
+
+    # A peak in the radial profile must be at least this FRACTION of the
+    # sector maximum to be counted as a real membrane peak.
+    # 0.3 = must be at least 30% of the brightest point in that sector.
+    'sector_peak_height_fraction': 0.3,
+
+    # A peak must also exceed this ABSOLUTE signal level.
+    # This prevents noise spikes in very dim sectors from being counted
+    # as membrane peaks (which would falsely inflate clustering risk).
+    # Set this to ~2-3x your camera's typical background noise level.
+    'sector_peak_min_signal': 10.0,
+
+    # Two peaks must be at least this many pixels apart to be counted
+    # as two separate peaks (rather than two sides of the same peak).
+    'sector_peak_min_distance_px': 3,
+
+    # Radius coefficient-of-variation (CV = std/mean) at which the
+    # radial-bumpiness score equals 1.0 (maximum bumpiness).
+    # 0.15 = a 15% variation in radius is considered "fully bumpy".
+    # Lower this to make the score stricter; raise it to be more lenient.
+    'max_radius_cv_threshold': 0.15,
+
+    # Intensity CV at which sector-uniformity score equals 1.0.
+    'max_intensity_cv_threshold': 0.40,
+
+    # ------------------------------------------------------------------
+    # OUTPUT OPTIONS
+    # ------------------------------------------------------------------
+
+    # Show an overview image with all detected vesicle centres marked.
+    'plot_detected_centres': True,
+
+    # Show the background mask for each vesicle (slow, useful for debugging).
+    'plot_mask': False,
+
+    # Save radial and angular intensity profile plots for each vesicle.
+    'plot_int_profiles': True,
+}
+
+# ===========================================================================
+#  PARALLEL PROCESSING
+# ===========================================================================
+
+# -1 = use all available CPU cores (fastest).
+#  1 = run one vesicle at a time (required for threshold_method_manual=True).
+n_jobs = -1
+
+# Safety check: warn the user if they've asked for interactive thresholding
+# in a parallel run — that combination will deadlock or crash.
+if ANALYSIS_CONFIG['threshold_method_manual'] and n_jobs != 1:
+    print("=" * 60)
+    print("WARNING: threshold_method_manual=True requires n_jobs=1.")
+    print("Interactive input does not work in parallel workers.")
+    print("Automatically setting n_jobs=1 for this run.")
+    print("=" * 60)
+    n_jobs = 1
+
+# ===========================================================================
+#  PREPARATION — runs once before the per-vesicle loop
+# ===========================================================================
+
+proteins_present = np.array((Septin, Actin), dtype=bool)
+
+# Package profile parameters into an array (skeleton.py uses index access)
+parameters_profiles = np.array((
+    ANALYSIS_CONFIG['num_angles'],
+    ANALYSIS_CONFIG['length_excess'],
+    ANALYSIS_CONFIG['dr'],
+))
+
+# Package size parameters into an array
+parameters_sizes = np.array((
+    ANALYSIS_CONFIG['size_mask'],
+    ANALYSIS_CONFIG['size_view'],
+    ANALYSIS_CONFIG['size_central_area'],
+))
+
+# Scan the membrane folder to find all experiment sets to process
+exp_info_all_sets = skl.find_projects_info(path_membrane)
+
+# Ensure we always have a 2D array, even if only one set was found
 if exp_info_all_sets.ndim == 1:
     num_sets = 1
     exp_info_all_sets = exp_info_all_sets.reshape(1, -1)
 else:
-    num_sets = len(exp_info_all_sets[:,0])
+    num_sets = len(exp_info_all_sets[:, 0])
+
+# ===========================================================================
+#  MAIN LOOP — one iteration per experiment set (image region)
+# ===========================================================================
 
 for s in range(num_sets):
-    
-    exp_info = exp_info_all_sets[s,:]
+
+    exp_info = exp_info_all_sets[s, :]
     print(f"--- Processing Set {s+1}/{num_sets}: {exp_info[2]} ---")
-    
-    ## Create Directory Structure: Output/Date_Exp/Region_ID
-    final_output_path = skl.create_directory_structure(path_to_output_root, exp_info)
-    
-    ## Create CSV in the new specific folder
+
+    # Create folder structure: Output / Date_Experiment / Region_ID
+    final_output_path = skl.create_directory_structure(path_to_output_root, exp_info, dataset_name)
+
+    # Create the CSV file and write its header row
     output_csv_path = skl.create_output_file(final_output_path, proteins_present)
 
-    ## Reading image data:
-    # UPDATED: Now unpacks 3 values (data, coords, pixel_size)
-    channels_data, coordinates, pixel_size = skl.read_files(path_membrane, path_septin, path_actin, path_detected, exp_info, proteins_present)
-    
+    # Read image channels and vesicle coordinates
+    channels_data, coordinates, pixel_size = skl.read_files(
+        path_membrane, path_septin, path_actin, path_detected,
+        exp_info, proteins_present
+    )
+
     if channels_data is None:
         print(f"    → Skipped (no detection data)\n")
         continue
-    
-    ## Creating colormaps
+
+    # Register custom colormaps (cyan, magenta, yellow)
     skl.color_maps()
 
-    ## Deriving useful parameters: 
-    num_vesicles = len(coordinates[:,0])
-    # Ensure dimensions are read correctly (Y, X)
-    image_dim  = np.array((channels_data.shape[1], channels_data.shape[0])) 
+    num_vesicles = len(coordinates[:, 0])
 
-    ## Optional plotting of the membrane channel with annotated vesicle centres:
-    skl.detected_centres(plot_detected_centres, num_vesicles, channels_data[:,:,0], coordinates[:,1], coordinates[:,2], final_output_path, exp_info)
+    # image_dim stores (X_size, Y_size) — used for boundary checking
+    image_dim = np.array((channels_data.shape[1], channels_data.shape[0]))
 
-    ## Optional manual choice of thresholding method (default method:Li):
-    # Pass first vesicle coordinates for threshold estimation
-    threshold_membrane = skl.define_threshold(threshold_method_manual, channels_data[:,:,0], size_mask, image_dim, coordinates[0,:]) 
-    
-    # List to collect radii for distribution plot
-    all_refined_radii = []
-
-#----------------------------------------------------------------
-
-#--------------------------- MAIN (PARALLEL) --------------------
-    
-    print(f"Starting parallel processing for {num_vesicles} vesicles (n_jobs={n_jobs})...")
-
-    # Run processing in parallel
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(skl.process_single_vesicle)(
-            coordinates[i,:], channels_data, image_dim, parameters_profiles, 
-            proteins_present, size_mask, threshold_membrane, final_output_path, 
-            exp_info, parameters_sizes, plot_int_profiles, plot_mask, pixel_size
-        ) for i in range(num_vesicles)
+    # Optional overview plot showing all detected vesicle centres
+    skl.detected_centres(
+        ANALYSIS_CONFIG['plot_detected_centres'],
+        num_vesicles,
+        channels_data[:, :, 0],
+        coordinates[:, 1],
+        coordinates[:, 2],
+        final_output_path,
+        exp_info
     )
 
-    # Collect results and write to CSV sequentially
+    # NOTE: The single global threshold calculation that was here before
+    # has been REMOVED. Each vesicle now computes its own threshold inside
+    # process_single_vesicle using its own local image region.
+    # This gives more accurate background masks for each individual vesicle.
+
+    all_refined_radii = []
+
+    # -----------------------------------------------------------------------
+    #  PARALLEL PROCESSING — each vesicle is processed independently
+    # -----------------------------------------------------------------------
+
+    print(f"Starting parallel processing for {num_vesicles} vesicles "
+          f"(n_jobs={n_jobs})...")
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(skl.process_single_vesicle)(
+            coordinates[i, :],
+            channels_data,
+            image_dim,
+            parameters_profiles,
+            proteins_present,
+            ANALYSIS_CONFIG['size_mask'],
+            final_output_path,
+            exp_info,
+            parameters_sizes,
+            ANALYSIS_CONFIG['plot_int_profiles'],
+            ANALYSIS_CONFIG['plot_mask'],
+            pixel_size,
+            ANALYSIS_CONFIG,
+        )
+        for i in range(num_vesicles)
+    )
+
+    # -----------------------------------------------------------------------
+    #  COLLECT RESULTS AND WRITE TO CSV
+    # -----------------------------------------------------------------------
+
     print("Saving results...")
-    
-    # We open in 'append' mode ('a') because create_output_file already wrote the header
+
+    # Open in append mode — the header was already written by create_output_file
     with open(output_csv_path, "a", newline='') as output_file:
         writer = csv.writer(output_file)
-        
+
         for row, refined_radius in results:
             writer.writerow(row)
             if refined_radius is not None and refined_radius > 0:
                 all_refined_radii.append(refined_radius)
 
-    # Plot Size Distribution
+    # Plot histogram of vesicle sizes
     skl.plot_size_distribution(all_refined_radii, final_output_path)
-    print("Done with set!")
+    print("Done with set!\n")
 
 print("All sets processed.")
