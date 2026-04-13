@@ -1,59 +1,73 @@
 # -*- coding: utf-8 -*-
 """
 SIZE ANALYSIS MODULE
-Analyzes the physical dimensions of vesicles.
+Analyzes the physical dimensions (radius) of vesicles across all 4 conditions.
+
+CHANGES FROM PREVIOUS VERSION:
+-------------------------------
+1. The histogram has been replaced with a combined violin + scatter + box plot.
+   This shows:
+     - The full distribution shape     (violin — wide where many vesicles)
+     - Individual vesicle data points  (scatter / strip plot)
+     - Median and quartile lines       (box plot overlaid on the violin)
+
+2. The violin plot is now the only size comparison plot
+   (previously there was a separate violin — that's now integrated).
 """
+
 import pandas as pd
 import os
 import plotting
 
+
 def save_size_statistics(df, output_dir):
     """
-    Calculates Mean, Std, SEM, and Count for vesicle size by Category.
-    Saves to CSV.
+    Calculates descriptive statistics (mean, std, SEM, count) for vesicle radius
+    grouped by condition (Category), and saves them to a CSV file.
+
+    Think of this like calculating the average height of students
+    in different classes and writing it down.
     """
     print("  -> Calculating Size Statistics...")
-    
-    # Group by Category and calculate stats for Radius
-    stats = df.groupby('Category')['Refined Radius (um)'].agg(['mean', 'std', 'sem', 'count'])
-    
-    # Rename columns for clarity
-    stats.columns = ['Mean_Radius_um', 'Std_Dev_um', 'SEM_um', 'N_Vesicles']
-    stats = stats.reset_index()
-    
-    # Save
+
+    stats = (
+        df.groupby('Category')['Refined Radius (um)']
+        .agg(['mean', 'std', 'sem', 'count'])
+        .rename(columns={
+            'mean':  'Mean_Radius_um',
+            'std':   'Std_Dev_um',
+            'sem':   'SEM_um',
+            'count': 'N_Vesicles',
+        })
+        .reset_index()
+    )
+
     path = os.path.join(output_dir, "Size_Statistics_Summary.csv")
     stats.to_csv(path, index=False)
-    print(f"  -> Stats saved: {path}")
+    print(f"  -> Size statistics saved: {path}")
+
 
 def run_size_analysis(df, output_dir):
     """
-    Triggers the generation of size-related visualizations and stats.
+    Generates the size distribution plot and saves size statistics.
+
+    Parameters
+    ----------
+    df         : pandas DataFrame — must contain 'Refined Radius (um)' and 'Category'
+    output_dir : str              — folder where output files are saved
     """
     print("\n--- Running Size Distribution Analysis ---")
-    
-    # 1. Comparison Histogram (Transparent Overlap)
-    # Uses 'hue' to separate Branched/Linear on the same plot
-    plotting.plot_histogram(
-        data=df,
-        column='Refined Radius (um)',
-        title='Size Distribution by Category',
-        xlabel='Refined Radius (µm)',
-        output_dir=output_dir,
-        filename='Global_Size_Distribution.png', # Filename kept, content changed
-        hue='Category'
-    )
 
-    # 2. Violin Plot
-    plotting.plot_violin_comparison(
+    # Combined violin + scatter + box plot for all 4 conditions
+    plotting.plot_violin_scatter_box(
         data=df,
         x_col='Category',
         y_col='Refined Radius (um)',
-        title='Size Density Distribution by Category (Violin)',
-        ylabel='Radius (µm)',
+        title='Vesicle Size Distribution by Condition',
+        ylabel='Refined Radius (µm)',
         output_dir=output_dir,
-        filename='Category_Size_Comparison_Violin.png'
+        filename='Size_Distribution_Violin_Scatter_Box.png',
     )
-    
-    # 3. Save Statistics
+
+    # Save descriptive statistics to CSV
     save_size_statistics(df, output_dir)

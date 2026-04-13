@@ -2,101 +2,189 @@
 """
 FILE HANDLING MODULE
 Loads and processes Analysis_Results.csv files from multiple batches.
+
+CHANGES FROM PREVIOUS VERSION:
+-------------------------------
+1. Category detection now reads from the FOLDER NAME, not the 'Date' column.
+   Previously, the code searched for 'BranchedCortex' inside the 'Date' column
+   (which contains a date like '260208'), so it never matched anything.
+
+   Now it works like this:
+     Path:   .../Output/260208_BranchedCortex_1/Region0000/Analysis_Results.csv
+     Folder: 260208_BranchedCortex_1   ← we look for the condition name HERE
+     Result: Category = 'BranchedCortex'
+
+2. A 'Batch_ID' column is added so you can trace each row back to its
+   original experiment folder (e.g., '260208_BranchedCortex_1').
+   This is useful for batch-to-batch comparisons later.
 """
 
 import os
 import pandas as pd
 import numpy as np
 
+
 def load_and_process_data(root_path, categories):
     """
-    Recursively finds all Analysis_Results.csv files, combines them,
-    assigns categories based on folder names, and filters invalid data.
+    Scans the root folder, finds every Analysis_Results.csv, loads them,
+    assigns a Category based on the folder name, and returns one combined table.
+
+    Think of this like going into a filing cabinet, reading every folder,
+    and putting all the papers into one big pile — but also labelling
+    each paper with which folder it came from.
+
+    Parameters
+    ----------
+    root_path  : str  — path to the top-level Output folder
+    categories : list — condition names to look for in folder names
+                        e.g. ['BranchedCortex', 'LinearCortex', 'Factin', 'Empty']
+
+    Returns
+    -------
+    master_df : pandas DataFrame, or None if no files were found
     """
     all_dfs = []
-    print(f"Scanning directory: {root_path}...\n")
+    print(f"Scanning directory: {root_path}\n")
 
+    # os.walk steps through every sub-folder inside root_path.
+    # For each folder it gives us:
+    #   dirpath   = full path of the current folder
+    #   dirnames  = names of sub-folders inside it (we don't need this)
+    #   filenames = names of files inside it
     for dirpath, dirnames, filenames in os.walk(root_path):
-        if "Analysis_Results.csv" in filenames:
-            file_path = os.path.join(dirpath, "Analysis_Results.csv")
-            
-            # Attempt 1: Strict Parsing (Standard)
+
+        if "Analysis_Results.csv" not in filenames:
+            continue  # Skip folders that don't have a results file
+
+        file_path = os.path.join(dirpath, "Analysis_Results.csv")
+
+        # ---- Determine the experiment folder name ----
+        # Example dirpath: .../Output/260208_BranchedCortex_1/Region0000
+        # os.path.dirname removes the last component → .../Output/260208_BranchedCortex_1
+        # os.path.basename takes only the last component → 260208_BranchedCortex_1
+        experiment_folder = os.path.basename(os.path.dirname(dirpath))
+
+        # ---- Determine which condition this folder belongs to ----
+        # We check whether any of our condition names appears inside the folder name.
+        # str.lower() makes the comparison case-insensitive.
+        assigned_category = 'Other'  # default if nothing matches
+        for cat in categories:
+            if cat.lower() in experiment_folder.lower():
+                assigned_category = cat
+                break  # stop once we find a match
+
+        # ---- Load the CSV file ----
+        # We try the standard way first, then a fallback if the file is malformed.
+        df = None
+
+        try:
+            df = pd.read_csv(file_path, quotechar='"', skipinitialspace=True)
+
+        except Exception:
             try:
-                df = pd.read_csv(file_path, quotechar='"', skipinitialspace=True)
-                
-            # Attempt 2: Fallback for "Expected 18 fields, saw 19" errors
-            except Exception:
-                try:
-                    # 'on_bad_lines' requires pandas >= 1.3
-                    # We use engine='python' for more robust parsing of complex quotes
-                    df = pd.read_csv(
-                        file_path, 
-                        quotechar='"', 
-                        skipinitialspace=True, 
-                        on_bad_lines='skip', 
-                        engine='python'
-                    )
-                    print(f"  ⚠ Loaded (with skips): {file_path} (Skipped malformed rows)")
-                except Exception as e:
-                    print(f"  ✗ Error reading {file_path}: {e}")
-                    continue
+                df = pd.read_csv(
+                    file_path,
+                    quotechar='"',
+                    skipinitialspace=True,
+                    on_bad_lines='skip',   # skip rows that can't be parsed
+                    engine='python'
+                )
+                print(f"  ⚠ Loaded with skipped rows: {file_path}")
+            except Exception as e:
+                print(f"  ✗ Could not read: {file_path}  ({e})")
+                continue  # skip this file entirely
 
-            # Process the successfully loaded dataframe
-            if 'Date' in df.columns:
-                all_dfs.append(df)
-                # Only print standard success if we didn't already print the warning
-                if "Skipped malformed rows" not in str(df): 
-                     # Note: logic above prints warning inside the except block, 
-                     # so strictly speaking we can just print the count here.
-                     pass
-            else:
-                print(f"  ✗ Skipped {file_path}: Missing 'Date' column")
+        # Check that the file has the columns we expect
+        if df is None or 'Date' not in df.columns:
+            print(f"  ✗ Skipped (missing 'Date' column): {file_path}")
+            continue
 
+        # ---- Tag each row with its origin ----
+        # This lets you trace any row back to its experiment and region later.
+        df['Category'] = assigned_category
+        df['Batch_ID'] = experiment_folder           # e.g. '260208_BranchedCortex_1'
+        df['Region_ID'] = os.path.basename(dirpath)  # e.g. 'Region0000'
+
+        all_dfs.append(df)
+        print(f"  ✓ Loaded [{assigned_category:>15}]  {experiment_folder} / {os.path.basename(dirpath)}"
+              f"  ({len(df)} rows)")
+
+    # ---- Nothing found ----
     if not all_dfs:
-        print("No data found!")
+        print("\nNo Analysis_Results.csv files found. Check ROOT_PATH.")
         return None
 
-    # 1. Combine Data
+    # ---- Combine all tables into one ----
+    # pd.concat stacks the tables vertically (one on top of the other).
+    # Columns that exist in one condition but not another (e.g. actin columns
+    # in Empty vesicles) will be filled with NaN automatically.
     master_df = pd.concat(all_dfs, ignore_index=True)
-    
-    # 2. Type Conversion
-    # Ensure numeric columns are actually numeric
+
+    # ---- Convert columns to numbers ----
+    # When pandas reads a CSV, some columns might be stored as text even though
+    # they contain numbers. errors='coerce' turns anything that isn't a number
+    # into NaN instead of crashing.
     numeric_cols = [
-        'Radius', 'M Background', 'A Background', 'A localization', 
-        'A Lumen', 'A Lumen/Bg', 't_cortex', 'ISM', 
-        'Gini_Index', 'Radial_Kurtosis', 'Refined Radius (um)'
+        'Radius', 'M Background', 'A Background', 'A localization',
+        'A Lumen', 'A Lumen/Bg', 't_cortex', 'ISM',
+        'Gini_Index', 'Refined Radius (um)',
+        'Deformability_Score', 'Radial_Bumpiness', 'Sector_Uniformity', 'Clustering_Risk',
     ]
-    
     for col in numeric_cols:
         if col in master_df.columns:
-            # errors='coerce' turns non-numeric strings into NaN
             master_df[col] = pd.to_numeric(master_df[col], errors='coerce')
-    
-    # 3. Filter Invalid Data
-    # Remove entries with Radius 0.0 or NaN (failed fits)
+
+    # ---- Filter 1: Remove vesicles with no valid raw radius ----
+    # A raw Radius of 0 or NaN means the Hough circle detection failed
+    # entirely — these rows have no meaningful data at all.
     initial_count = len(master_df)
     master_df = master_df.dropna(subset=['Radius'])
     master_df = master_df[master_df['Radius'] > 0]
-    removed = initial_count - len(master_df)
-    
-    if removed > 0:
-        print(f"\n  → Removed {removed} vesicles with invalid Radius (0 or NaN)")
-    
-    # 4. Assign Categories
-    master_df['Category'] = 'Other'
-    for cat in categories:
-        # Case-insensitive match for category keywords in the Date/Folder name
-        master_df.loc[master_df['Date'].str.contains(cat, case=False, na=False), 'Category'] = cat
+    removed_raw = initial_count - len(master_df)
 
-    print(f"\n Successfully loaded {len(master_df)} vesicles across {master_df['Date'].nunique()} batches.")
-    
-    # Debug: Print category distribution
-    print(f" Categories: {master_df['Category'].value_counts().to_dict()}")
-    
+    if removed_raw > 0:
+        print(f"\n  → Removed {removed_raw} vesicles with invalid raw Radius (0 or NaN)")
+
+    # ---- Filter 2: Minimum physical size (Refined Radius) ----
+    # The refined radius comes from membrane peak detection in skeleton.py
+    # and is a more accurate measure of the true vesicle size than the
+    # raw Hough radius.
+    #
+    # Two categories of rows are removed here:
+    #   a) Refined Radius = 0 or NaN — membrane detection failed entirely
+    #      (e.g. vesicle was at image margin, or no membrane peak was found).
+    #      These rows were written with a placeholder of 0 by skeleton.py.
+    #   b) Refined Radius < MIN_VESICLE_RADIUS_UM — genuine debris or
+    #      sub-resolution objects too small to analyse meaningfully.
+    #
+    # *** Keep MIN_VESICLE_RADIUS_UM in sync with
+    #     'min_vesicle_radius_um' in main.py's ANALYSIS_CONFIG ***
+    MIN_VESICLE_RADIUS_UM = 3.06   # µm
+
+    if 'Refined Radius (um)' in master_df.columns:
+        before = len(master_df)
+        master_df = master_df.dropna(subset=['Refined Radius (um)'])
+        master_df = master_df[master_df['Refined Radius (um)'] >= MIN_VESICLE_RADIUS_UM]
+        removed_small = before - len(master_df)
+        if removed_small > 0:
+            print(f"  → Removed {removed_small} vesicles with refined radius "
+                  f"< {MIN_VESICLE_RADIUS_UM} µm or failed membrane detection")
+
+    # ---- Summary ----
+    print(f"\n  ✓ Total vesicles loaded: {len(master_df)}")
+    print(f"  ✓ Across {master_df['Batch_ID'].nunique()} experiment batches")
+    print(f"  ✓ Category breakdown:")
+    for cat, count in master_df['Category'].value_counts().items():
+        print(f"      {cat:>15} : {count} vesicles")
+
     return master_df
 
+
 def create_output_folder(root_path, folder_name):
-    """Creates a timestamped output directory."""
+    """
+    Creates an output directory if it doesn't already exist.
+    Returns the full path to that directory.
+    """
     path = os.path.join(root_path, folder_name)
     if not os.path.exists(path):
         os.makedirs(path)

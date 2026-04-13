@@ -190,12 +190,34 @@ def read_files(path_membrane, path_septin, path_actin, path_detected,
 def create_output_file(final_output_path, proteins_present):
     """
     Creates an empty output CSV file with the correct column headers.
+
+    FIX: The fallback header list (used when no proteins are present, e.g.
+    the Empty condition) previously only contained ["M Background"].
+    This meant that columns computed purely from the MEMBRANE channel —
+    specifically 'Refined Radius (um)', 'Comment', and all shape analysis
+    metrics — were never written to the CSV for Empty vesicles.
+
+    This is incorrect because:
+      - The refined radius comes from refine_guv_center(), which runs
+        for every vesicle regardless of protein content.
+      - Shape analysis (sector-based deformability) also only uses the
+        membrane channel (intensity_profiles[:, :, 0]).
+      - Both are important quality metrics even when no protein is present.
+
+    The fix adds these membrane-derived columns to all header variants,
+    including the fallback case.
     """
     protein_status = plot_format(proteins_present)
 
     base_headers = ["Date", "Name", "Image", "Vesicle id", "xc", "yc", "Radius"]
 
-    specific_headers = ["M Background"]  # default fallback
+    # These columns are ALWAYS computed, regardless of which proteins are
+    # present.  They come from the membrane channel only.
+    membrane_only_headers = [
+        "Deformability_Score", "Radial_Bumpiness", "Sector_Uniformity",
+        "Clustering_Risk", "Shape_Quality_Flag", "Sector_Details",
+        "Refined Radius (um)", "Comment",
+    ]
 
     if protein_status == "both_proteins":
         specific_headers = [
@@ -203,30 +225,37 @@ def create_output_file(final_output_path, proteins_present):
             "S localization", "A localization",
             "S Lumen", "A Lumen", "S Lumen/Bg", "A Lumen/Bg",
             "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
-            "Deformability_Score", "Radial_Bumpiness", "Sector_Uniformity",
-            "Clustering_Risk", "Shape_Quality_Flag", "Sector_Details",
-            "Refined Radius (um)", "Comment",
         ]
 
-    if protein_status == "only_septin":
+    elif protein_status == "only_septin":
         specific_headers = [
             "M Background", "S Background", "S localization",
-            "Deformability_Score", "Radial_Bumpiness", "Sector_Uniformity",
-            "Clustering_Risk", "Shape_Quality_Flag", "Sector_Details",
-            "Refined Radius (um)", "Comment",
+            "S Lumen", "S Lumen/Bg",             
+            "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
         ]
 
-    if protein_status == "only_actin":
+    elif protein_status == "only_actin":
         specific_headers = [
             "M Background", "A Background", "A localization",
             "A Lumen", "A Lumen/Bg",
             "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
-            "Deformability_Score", "Radial_Bumpiness", "Sector_Uniformity",
-            "Clustering_Risk", "Shape_Quality_Flag", "Sector_Details",
-            "Refined Radius (um)", "Comment",
         ]
 
-    column_headers = base_headers + specific_headers
+    else:
+        # No proteins present (e.g. Empty condition).
+        # We still have membrane background and all membrane-derived
+        # quality metrics — these go into membrane_only_headers below.
+        specific_headers = [
+            "M Background",
+            "t_cortex", "ISM", "Gini_Index", "Radial_Kurtosis",
+        ]
+
+    # Build the full column list:
+    #   base columns + protein-specific columns + membrane-only columns
+    # The membrane-only columns come LAST so they align with the values
+    # appended at the end of format_result_row().
+    column_headers = base_headers + specific_headers + membrane_only_headers
+
     output_csv_path = os.path.join(final_output_path, "Analysis_Results.csv")
 
     with open(output_csv_path, "w", newline='') as output_file:
@@ -1485,7 +1514,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
         background       = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels - 1)
         # lumen_val already initialised at the top of this function
-        comment = comment_peak
+        comment += comment_peak
         comment_final = [', '.join(comment)] if comment else ["OK"]
         row = format_result_row(
             exp_info, ves_coordinates, background, localization_val,
