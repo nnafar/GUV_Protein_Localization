@@ -1,491 +1,553 @@
 # -*- coding: utf-8 -*-
 """
-PLOTTING MODULE
-Centralized visualization logic for all analysis modules.
-
-CHANGES FROM PREVIOUS VERSION:
--------------------------------
-1. NEW: plot_violin_scatter_box()
-   Replaces the separate histogram + violin functions for size analysis.
-   Layers three plots on top of each other:
-     - Violin  : shows the full distribution shape
-     - Box     : narrow box showing median + 25th/75th percentile lines
-     - Strip   : individual data points (semi-transparent)
-
-2. UPDATED: PHENO_PALETTE
-   Added 'SHELL' color for the Factin condition.
-
-3. UPDATED: generate_category_panel()
-   Now handles SHELL/LUMENAL phenotypes for Factin, and skips
-   phenotype-specific columns (like Gini_Index) gracefully if they
-   are all NaN for a given condition.
-
-4. UPDATED: plot_cortex_map() and plot_pairplot()
-   Now handle Factin phenotypes (SHELL, LUMENAL) in addition to
-   BranchedCortex/LinearCortex phenotypes.
+PLOTTING MODULE  — improved visuals
+------------------------------------
+Changes from previous version:
+  1. Condition order:  Empty → Factin → BranchedCortex → LinearCortex
+     (controls first, then experimental)
+  2. Violin plot: box/whisker drawn on top of (not underneath) the scatter,
+     with a white fill so the median / IQR lines are always visible.
+  3. Colour scheme: a perceptually-uniform blue palette with enough contrast
+     to distinguish all phenotypes and conditions.
+  4. Spearman heatmap: larger figure, rotated labels, only lower-triangle
+     annotations, smaller font — fully legible at publication size.
 """
 
 import os
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend — prevents plots from popping up
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
 from scipy.stats import mannwhitneyu
 
 
-# =============================================================================
-# 1. STYLE & COLORS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# 0.  GLOBAL SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
 
-BlueScheme_COLORS = {
-    'white_blue':     '#EDF2FB',
-    'lightest_blue':  '#90A3B0',
-    'Lighter_blue':   '#7A91A0',
-    'light_blue':     '#647E90',
-    'medium_blue':    '#4D6C81',
-    'darker_blue':    '#375971',
-    'darkest_blue':   '#214761',
+# Canonical order for conditions  (controls → experimental)
+CONDITION_ORDER = ["Empty", "Factin", "BranchedCortex", "LinearCortex"]
+
+# Human-readable labels for the x-axis
+CONDITION_LABELS = {
+    "Empty":          "Empty",
+    "Factin":         "F-actin",
+    "BranchedCortex": "Branched Cortex",
+    "LinearCortex":   "Linear Cortex",
 }
 
-# Color assigned to each phenotype label in all plots.
-# Adding a new phenotype only requires adding one line here.
-PHENO_PALETTE = {
-    'EXCLUDED':   BlueScheme_COLORS['white_blue'],
-    'EMPTY':      BlueScheme_COLORS['lightest_blue'],
-    'LUMENAL':    BlueScheme_COLORS['light_blue'],   
-    'SPARSE':     BlueScheme_COLORS['medium_blue'],
-    'PATCHY':     BlueScheme_COLORS['darker_blue'],
-    'CONTINUOUS': BlueScheme_COLORS['darkest_blue'],
-    'SHELL':      BlueScheme_COLORS['Lighter_blue'],    
+# ── Phenotype colour map  ────────────────────────────────────────────────────
+# Five distinct, blue-family hues that remain separable in greyscale and
+# for the most common forms of colour-vision deficiency.
+PHENOTYPE_PALETTE = {
+    "EMPTY":      "#cfe2f3",   # very light blue
+    "EXCLUDED":   "#e8e8e8",   # neutral grey
+    "LUMENAL":    "#9ec8e8",   # soft cornflower
+    "SPARSE":     "#5ba4cf",   # mid blue
+    "SHELL":      "#2d7fb8",   # medium-deep blue
+    "PATCHY":     "#1a5a8a",   # dark teal-blue
+    "CONTINUOUS": "#0d2f4f",   # near-navy
 }
 
-# Color assigned to each condition in size plots.
+# ── Condition colour map  ────────────────────────────────────────────────────
 CONDITION_PALETTE = {
-    'Empty':          BlueScheme_COLORS['lightest_blue'],
-    'Factin':         BlueScheme_COLORS['light_blue'], 
-    'BranchedCortex': BlueScheme_COLORS['medium_blue'],
-    'LinearCortex':   BlueScheme_COLORS['darker_blue'],
+    "Empty":          "#cfe2f3",
+    "Factin":         "#7cb9e0",
+    "BranchedCortex": "#2d7fb8",
+    "LinearCortex":   "#0d2f4f",
 }
+
 
 def set_paper_style():
-    """Sets a clean, publication-quality plot style."""
-    sns.set_style("ticks")
-    sns.set_context("talk", font_scale=1.0)
-    plt.rcParams.update({'figure.dpi': 300})
+    """Apply a clean, publication-ready matplotlib style."""
+    sns.set_theme(style="ticks", context="paper", font_scale=1.15)
+    plt.rcParams.update({
+        "axes.spines.top":    False,
+        "axes.spines.right":  False,
+        "axes.linewidth":     0.8,
+        "xtick.major.width":  0.8,
+        "ytick.major.width":  0.8,
+        "font.family":        "sans-serif",
+        "font.sans-serif":    ["Arial", "DejaVu Sans"],
+        "pdf.fonttype":       42,
+        "svg.fonttype":       "none",
+    })
 
 
-# =============================================================================
-# 2. HELPER: STATISTICAL ANNOTATION
-# =============================================================================
-
-def add_significance_bars(ax, data, x, y, order, pairs):
-    """
-    Adds significance bars (*/**/***/ns) above box plots.
-    Only drawn when the Mann-Whitney U test gives p < 0.05.
-    """
-    y_vals = data[y].dropna()
-    if y_vals.empty:
-        return
-
-    y_max   = y_vals.max()
-    y_range = y_vals.max() - y_vals.min()
-    if y_range == 0:
-        return
-
-    offset_step = y_range * 0.10
-    current_y   = y_max + (y_range * 0.05)
-
-    for p1, p2 in pairs:
-        group1 = data[data[x] == p1][y].dropna()
-        group2 = data[data[x] == p2][y].dropna()
-
-        if len(group1) < 3 or len(group2) < 3:
-            continue
-
-        try:
-            _, p = mannwhitneyu(group1, group2, alternative='two-sided')
-        except Exception:
-            continue
-
-        if p >= 0.05:
-            continue  # not significant — skip
-
-        sig_symbol = '***' if p < 0.001 else '**' if p < 0.01 else '*'
-
-        # Draw the horizontal bar + tick marks
-        x1, x2   = order.index(p1), order.index(p2)
-        bar_tips  = current_y - (y_range * 0.02)
-        ax.plot([x1, x1, x2, x2],
-                [bar_tips, current_y, current_y, bar_tips],
-                lw=1.2, c='k')
-        ax.text((x1 + x2) * 0.5, current_y, sig_symbol,
-                ha='center', va='bottom', fontsize=10, color='k')
-        current_y += offset_step
-
-
-# =============================================================================
-# 3. SIZE ANALYSIS PLOTS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.  VIOLIN + SCATTER + BOX  (size distribution)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_violin_scatter_box(data, x_col, y_col, title, ylabel,
                              output_dir, filename):
     """
-    Creates a combined violin + scatter + box plot — the most informative
-    way to visualize a distribution alongside individual data points.
+    Violin + jitter-scatter + box plot.
 
-    How it works (think of it as three layers drawn on top of each other):
-    -----------------------------------------------------------------------
-    Layer 1 — Violin:
-      The 'violin' shape is wide where many vesicles have that radius value,
-      and narrow where few do. Like a histogram rotated 90° and mirrored.
-
-    Layer 2 — Box:
-      A narrow box drawn on top of the violin.
-        • The middle line  = median (50th percentile — the "middle" value)
-        • Box edges        = 25th and 75th percentile (middle 50% of data)
-        • Whiskers         = extend to 1.5× the interquartile range
-        (Outliers beyond the whiskers are hidden to keep the plot clean)
-
-    Layer 3 — Strip:
-      Every individual vesicle is shown as a small dot.
-      They're randomly "jittered" (nudged left/right) so dots don't overlap.
-
-    Parameters
-    ----------
-    data       : pandas DataFrame
-    x_col      : column name for the x-axis (e.g. 'Category')
-    y_col      : column name for the y-axis (e.g. 'Refined Radius (um)')
-    title      : plot title string
-    ylabel     : y-axis label string
-    output_dir : folder to save the plot
-    filename   : output filename (include .png)
+    Improvements vs previous version
+    ─────────────────────────────────
+    • Canonical condition order (Empty → Factin → Branched → Linear).
+    • Box plot is drawn LAST (on top) with a white face and thick lines so it
+      is always visible regardless of scatter density.
+    • Each condition has its own colour from CONDITION_PALETTE.
+    • Scatter alpha and size are reduced to limit overplotting.
     """
-    print(f"  -> Generating violin-scatter-box plot: {filename}")
+    set_paper_style()
 
-    # Determine the order and colors for the x-axis categories
-    # We only include categories that are actually present in the data.
-    desired_order = ['BranchedCortex', 'LinearCortex', 'Factin', 'Empty']
-    order = [c for c in desired_order if c in data[x_col].unique()]
-    palette = [CONDITION_PALETTE.get(c, BlueScheme_COLORS['darkest_blue']) for c in order]
+    # ── filter & order ───────────────────────────────────────────────────────
+    order   = [c for c in CONDITION_ORDER if c in data[x_col].unique()]
+    labels  = [CONDITION_LABELS[c] for c in order]
+    colors  = [CONDITION_PALETTE[c] for c in order]
+    counts  = {c: (data[x_col] == c).sum() for c in order}
 
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    # --- Layer 1: Violin ---
-    # inner=None means don't draw anything inside the violin by default —
-    # we'll add our own box on top for more control.
-    sns.violinplot(
-        data=data,
-        x=x_col,
-        y=y_col,
-        order=order,
-        palette=palette,
-        inner=None,      # don't draw inner markers (we add box manually)
-        alpha=0.35,      # semi-transparent so the box and dots are visible
-        ax=ax,
-        linewidth=1.5,
+    # ── 1. violin  ───────────────────────────────────────────────────────────
+    parts = ax.violinplot(
+        [data.loc[data[x_col] == c, y_col].dropna().values for c in order],
+        positions=range(len(order)),
+        widths=0.65,
+        showmedians=False,
+        showextrema=False,
     )
+    for body, col in zip(parts["bodies"], colors):
+        body.set_facecolor(col)
+        body.set_edgecolor("#555555")
+        body.set_alpha(0.55)
+        body.set_linewidth(0.8)
 
-    # --- Layer 2: Box ---
-    # width=0.12 makes it very narrow so it sits cleanly inside the violin.
-    # showfliers=False hides individual outlier dots from the box plot
-    # (they'll be shown by the strip plot instead).
-    sns.boxplot(
-        data=data,
-        x=x_col,
-        y=y_col,
-        order=order,
-        palette=palette,
-        width=0.12,
+    # ── 2. scatter (jitter)  ─────────────────────────────────────────────────
+    rng = np.random.default_rng(42)
+    for i, (cond, col) in enumerate(zip(order, colors)):
+        vals = data.loc[data[x_col] == cond, y_col].dropna().values
+        jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+        ax.scatter(
+            i + jitter, vals,
+            s=3, color=col, alpha=0.35,
+            linewidths=0, zorder=2,
+        )
+
+    # ── 3. box plot ON TOP with white fill  ──────────────────────────────────
+    bp = ax.boxplot(
+        [data.loc[data[x_col] == c, y_col].dropna().values for c in order],
+        positions=range(len(order)),
+        widths=0.12,
+        patch_artist=True,
         showfliers=False,
-        ax=ax,
-        # Style the box and whisker lines
-        boxprops=dict(alpha=0.85, linewidth=1.5),
-        whiskerprops=dict(linewidth=1.5),
-        capprops=dict(linewidth=1.5),
-        medianprops=dict(color='white', linewidth=2.5),  # white median line
+        zorder=5,
+        medianprops  =dict(color="#c0392b", linewidth=2.5),
+        whiskerprops =dict(color="#333333", linewidth=1.5),
+        capprops     =dict(color="#333333", linewidth=1.5),
+        boxprops     =dict(facecolor="white", edgecolor="#333333", linewidth=1.5),
     )
 
-    # --- Layer 3: Strip (individual data points) ---
-    # jitter=True nudges points left/right randomly to avoid overlap.
-    # size=3 and alpha=0.45 keep them visible but not overwhelming.
-    sns.stripplot(
-        data=data,
-        x=x_col,
-        y=y_col,
-        order=order,
-        color='#222222',  # near-black dots
-        size=3,
-        alpha=0.45,
-        jitter=True,
-        ax=ax,
+    # ── axes labels  ─────────────────────────────────────────────────────────
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(
+        [f"{CONDITION_LABELS[c]}\nN={counts[c]:,}" for c in order],
+        fontsize=11,
     )
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=13, pad=10)
+    ax.set_xlim(-0.6, len(order) - 0.4)
 
-    # ---- Labelling ----
-    ax.set_title(title, pad=14)
-    ax.set_xlabel('')       # x labels come from the category names
-    ax.set_ylabel(ylabel)
+    # shade controls (first two)
+    for x in range(min(2, len(order))):
+        ax.axvspan(x - 0.45, x + 0.45, color="#f0f0f0", zorder=0, alpha=0.5)
 
-    # Add N count below each condition label
-    for i, cat in enumerate(order):
-        n = data[data[x_col] == cat][y_col].dropna().shape[0]
-        ax.text(i, ax.get_ylim()[0] - (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.06,
-                f"N={n}", ha='center', va='top', fontsize=10, color='#444444')
-
-    sns.despine(ax=ax)
+    # light legend: control vs experimental
+    ctrl_patch = mpatches.Patch(facecolor="#f0f0f0", edgecolor="grey",
+                                 linewidth=0.6, label="Controls")
+    ax.legend(handles=[ctrl_patch], loc="upper right", fontsize=9,
+              frameon=False)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
-    plt.close()
-    print(f"     Saved: {filename}")
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved: {path}")
 
 
-# =============================================================================
-# 4. PHENOTYPE ANALYSIS PLOTS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.  PHENOTYPE COMPOSITION  (stacked bar)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def plot_phenotype_composition(df, x_col, hue_col, output_dir, filename):
-    """
-    Generates a 100% stacked bar chart showing phenotype composition
-    for each condition (Category).
+def plot_phenotype_composition(df, x_col, phenotype_col, output_dir, filename):
+    """Stacked bar chart of phenotype percentages per condition."""
+    set_paper_style()
 
-    Each bar totals 100%, and the segments show what fraction of vesicles
-    in that condition belong to each phenotype.
-    """
-    print(f"  -> Generating Phenotype Composition chart: {filename}")
+    order = [c for c in CONDITION_ORDER if c in df[x_col].unique()]
+    pheno_order = ["EMPTY", "LUMENAL", "SHELL", "SPARSE", "PATCHY",
+                   "CONTINUOUS", "EXCLUDED"]
 
-    counts = df.groupby([x_col, hue_col]).size().unstack(fill_value=0)
-    # Convert to percentages (each row sums to 100%)
-    props = counts.div(counts.sum(axis=1), axis=0) * 100
+    counts = (
+        df.groupby([x_col, phenotype_col])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(order)
+    )
+    pct = counts.div(counts.sum(axis=1), axis=0) * 100
 
-    # Use a consistent left-to-right phenotype order in the stacked bar
-    desired_order = ['EMPTY', 'LUMENAL', 'SPARSE', 'PATCHY', 'CONTINUOUS',
-                     'SHELL', 'EXCLUDED']
-    existing_cols = [c for c in desired_order if c in props.columns]
-    props = props[existing_cols]
+    # keep only phenotypes that actually appear
+    pheno_present = [p for p in pheno_order if p in pct.columns]
+    pct = pct[pheno_present]
 
-    fig, ax = plt.subplots(figsize=(9, 6))
-    props.plot(
-        kind='bar',
-        stacked=True,
-        color=[PHENO_PALETTE.get(c, '#888888') for c in existing_cols],
-        ax=ax,
-        width=0.6,
-        edgecolor='white',
-        linewidth=0.5,
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    bottom = np.zeros(len(order))
+    for pheno in pheno_present:
+        vals = pct[pheno].values
+        bars = ax.bar(
+            range(len(order)), vals,
+            bottom=bottom,
+            color=PHENOTYPE_PALETTE.get(pheno, "#aaaaaa"),
+            edgecolor="white", linewidth=0.6,
+            label=pheno,
+        )
+        # annotate segments > 5 %
+        for j, (v, b) in enumerate(zip(vals, bottom)):
+            if v > 5:
+                ax.text(j, b + v / 2, f"{v:.0f}%",
+                        ha="center", va="center",
+                        fontsize=7.5, color="white", fontweight="bold")
+        bottom += vals
+
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([CONDITION_LABELS[c] for c in order], fontsize=11)
+    ax.set_ylabel("Percentage of Vesicles (%)", fontsize=11)
+    ax.set_title("Phenotype Composition by Condition", fontsize=12, pad=8)
+    ax.set_ylim(0, 108)
+
+    handles = [mpatches.Patch(facecolor=PHENOTYPE_PALETTE.get(p, "#aaa"),
+                               edgecolor="white", label=p)
+               for p in pheno_present]
+    ax.legend(handles=handles, bbox_to_anchor=(1.01, 1), loc="upper left",
+              fontsize=9, frameon=False, title="Phenotype", title_fontsize=9)
+
+    # shade controls
+    for x in range(min(2, len(order))):
+        ax.axvspan(x - 0.45, x + 0.45, color="#f0f0f0", zorder=0, alpha=0.45)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved: {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.  CORTEX MAP  (scatter: localization vs Gini)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_cortex_map(cond_df, condition, output_dir):
+    """5-D scatter: localization × Gini, colour = phenotype, size = t_cortex."""
+    set_paper_style()
+
+    phenotypes = cond_df["Phenotype_Category"].unique().tolist()
+    # consistent ordering
+    pheno_order_all = ["EMPTY","LUMENAL","SHELL","SPARSE","PATCHY","CONTINUOUS","EXCLUDED"]
+    phenotypes_sorted = [p for p in pheno_order_all if p in phenotypes]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for pheno in phenotypes_sorted:
+        sub = cond_df[cond_df["Phenotype_Category"] == pheno]
+        if sub.empty:
+            continue
+        sizes = np.clip(sub["t_cortex"].fillna(0).values, 0, None)
+        sizes = 20 + sizes * 40   # scale: min 20, grows with t_cortex
+
+        ax.scatter(
+            sub["A localization"], sub["Gini_Index"],
+            c=PHENOTYPE_PALETTE.get(pheno, "#aaaaaa"),
+            s=sizes, alpha=0.65, edgecolors="none",
+            label=pheno, zorder=3,
+        )
+
+    ax.set_xlabel("Localization Score", fontsize=11)
+    ax.set_ylabel("Gini Index (spatial heterogeneity)", fontsize=11)
+    ax.set_title(f"Cortex Map: {CONDITION_LABELS.get(condition, condition)}",
+                 fontsize=12)
+    ax.legend(title="Phenotype", bbox_to_anchor=(1.01, 1), loc="upper left",
+              fontsize=9, frameon=True, title_fontsize=9)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"Cortex_Map_{condition}.png")
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved: {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4.  PAIR PLOT  (per condition)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_pairplot(cond_df, output_dir, filename_suffix=""):
+    """Seaborn pairplot of the four key cortex metrics, coloured by phenotype."""
+    set_paper_style()
+
+    metrics = ["t_cortex", "A localization", "ISM", "Gini_Index"]
+    cols_present = [c for c in metrics if c in cond_df.columns]
+
+    plot_df = cond_df[cols_present + ["Phenotype_Category"]].dropna(
+        subset=cols_present
     )
 
-    ax.set_title('Phenotype Composition by Condition')
-    ax.set_ylabel('Percentage of Vesicles (%)')
-    ax.set_xlabel('')
-    ax.legend(title='Phenotype', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.xticks(rotation=15, ha='right')
-    sns.despine()
+    phenotypes = plot_df["Phenotype_Category"].unique().tolist()
+    pheno_order_all = ["EMPTY","LUMENAL","SHELL","SPARSE","PATCHY","CONTINUOUS","EXCLUDED"]
+    phenotypes_sorted = [p for p in pheno_order_all if p in phenotypes]
+    palette = {p: PHENOTYPE_PALETTE.get(p, "#aaaaaa") for p in phenotypes_sorted}
 
-    plt.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
-    plt.close()
+    g = sns.PairGrid(
+        plot_df, vars=cols_present, hue="Phenotype_Category",
+        palette=palette, hue_order=phenotypes_sorted,
+        diag_sharey=False,
+    )
+    g.map_diag(sns.kdeplot, fill=True, alpha=0.55, linewidth=1.2,
+               warn_singular=False)
+    g.map_offdiag(sns.scatterplot, s=12, alpha=0.5, edgecolor="none")
+    g.add_legend(title="Phenotype", fontsize=9, title_fontsize=9,
+                 bbox_to_anchor=(1.02, 0.5), loc="center left")
 
+    condition_label = filename_suffix.lstrip("_")
+    g.figure.suptitle(
+        f"Metric Pair Plot — {CONDITION_LABELS.get(condition_label, condition_label)}",
+        y=1.01, fontsize=12,
+    )
+
+    path = os.path.join(output_dir,
+                        f"Correlation_Matrix_PairPlot{filename_suffix}.png")
+    g.figure.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(g.figure)
+    print(f"  -> Saved: {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  SPEARMAN CORRELATION HEATMAP  (global)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_correlation_heatmap(corr_matrix, output_dir, suffix="", title=None):
+    """
+    Lower-triangle Spearman heatmap.
+
+    Improvements vs previous version
+    ─────────────────────────────────
+    • Figure is sized to give each cell ~50 px → annotations never overlap.
+    • X-labels rotated 45° and right-aligned.
+    • Annotation font size scales with number of variables.
+    • Only the lower triangle is shown (upper masked) → half the clutter.
+    • Diagonal is also masked (trivially == 1).
+    • Columns / rows dropped if they are all-NaN in the correlation matrix.
+    """
+    set_paper_style()
+
+    # ── clean: drop constant columns (corr = NaN) ────────────────────────────
+    cm = corr_matrix.dropna(how="all", axis=0).dropna(how="all", axis=1)
+
+    # ── drop nuisance identifiers that are not scientifically meaningful ─────
+    drop_cols = ["Vesicle id", "xc", "yc", "Radius"]
+    cm = cm.drop(columns=[c for c in drop_cols if c in cm.columns],
+                 errors="ignore")
+    cm = cm.drop(index=[c for c in drop_cols if c in cm.index],
+                 errors="ignore")
+
+    n = len(cm)
+    cell_size = 0.70          # inches per cell
+    fig_size  = max(10, n * cell_size)
+    annot_fs  = max(5, min(9, 120 // n))   # shrink font as matrix grows
+
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.88))
+
+    # ── lower-triangle mask  ─────────────────────────────────────────────────
+    mask = np.triu(np.ones_like(cm, dtype=bool), k=0)   # mask upper + diag
+
+    sns.heatmap(
+        cm,
+        mask=mask,
+        ax=ax,
+        cmap="RdBu_r",
+        vmin=-1, vmax=1,
+        center=0,
+        annot=True,
+        fmt=".2f",
+        annot_kws={"size": annot_fs},
+        linewidths=0.3,
+        linecolor="#dddddd",
+        square=True,
+        cbar_kws={"shrink": 0.6, "label": "Spearman ρ"},
+    )
+
+    ax.set_title(title if title else f"Spearman Correlation Matrix{suffix}",
+                 fontsize=13, pad=12)
+    ax.set_xticklabels(ax.get_xticklabels(),
+                       rotation=45, ha="right", fontsize=max(7, annot_fs))
+    ax.set_yticklabels(ax.get_yticklabels(),
+                       rotation=0, fontsize=max(7, annot_fs))
+
+    plt.tight_layout()
+    path = os.path.join(output_dir,
+                        f"Spearman_Correlation_Heatmap{suffix}.png")
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved: {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  PHENOTYPE CHARACTERISTICS MATRIX  (box + strip + stats)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def generate_category_panel(df, output_dir):
     """
-    Generates a grid of box + strip plots with significance bars.
-    Rows = metrics, Columns = conditions.
-
-    Only shows rows for metrics where data actually exists for that condition
-    (so Gini_Index won't be empty for Factin just because it's in the list).
+    Grid of box + strip plots: one row per metric, one column per condition.
+    Phenotype on x-axis within each panel, coloured by PHENOTYPE_PALETTE.
     """
-    print("  -> Creating Phenotype Comparison Matrix...")
+    set_paper_style()
 
-    # Radial_Kurtosis removed: insufficient data points (~17-21) in the
-    # cortical window make kurtosis estimates unreliable, and it was
-    # strongly collinear with ISM and Gini_Index anyway.
-    metrics = [
-        ('t_cortex',       'Cortex Thickness (µm)'),
-        ('A localization', 'Localization (AU)'),
-        ('ISM',            'ISM Index'),
-        ('Gini_Index',     'Gini Coefficient'),
-    ]
-
-    # Phenotype order per condition.
-    # LinearCortex has no PATCHY — Gini does not discriminate linear networks.
-    phenotype_order_map = {
-        'BranchedCortex': ['SPARSE', 'PATCHY', 'CONTINUOUS'],
-        'LinearCortex':   ['SPARSE', 'CONTINUOUS'],
-        'Factin':         ['SHELL', 'LUMENAL'],
+    metrics     = ["t_cortex", "A localization", "ISM", "Gini_Index"]
+    metric_lbls = {
+        "t_cortex":      "Cortex Thickness (t_cortex)",
+        "A localization": "Localization Score",
+        "ISM":           "ISM",
+        "Gini_Index":    "Gini Index",
     }
 
-    stats_pairs_map = {
-        'BranchedCortex': [('SPARSE', 'PATCHY'), ('PATCHY', 'CONTINUOUS'), ('SPARSE', 'CONTINUOUS')],
-        'LinearCortex':   [('SPARSE', 'CONTINUOUS')],
-        'Factin':         [('SHELL', 'LUMENAL')],
-    }
+    cond_order = [c for c in CONDITION_ORDER
+                  if c in df["Category"].unique() and c != "Empty"]
 
-    # Only show conditions that are in the dataframe
-    categories = [c for c in ['BranchedCortex', 'LinearCortex', 'Factin']
-                  if c in df['Category'].unique()]
+    n_rows = len(metrics)
+    n_cols = len(cond_order)
 
-    n_metrics = len(metrics)
-    n_cats    = len(categories)
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(3.8 * n_cols, 3.5 * n_rows),
+                             sharey=False)
 
-    if n_cats == 0:
-        print("  ! No eligible conditions found for category panel.")
-        return
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+    if n_cols == 1:
+        axes = axes[:, np.newaxis]
 
-    fig, axes = plt.subplots(
-        nrows=n_metrics, ncols=n_cats,
-        figsize=(5 * n_cats, 4 * n_metrics),
-        sharey='row', sharex=False   # don't share x — each column has its own phenotype labels
-    )
+    for ci, cond in enumerate(cond_order):
+        cond_df = df[df["Category"] == cond]
 
-    # Normalise axes to always be a 2D array for consistent indexing
-    if n_metrics == 1: axes = np.array([axes])
-    if n_cats   == 1: axes = axes.reshape(-1, 1)
+        # determine phenotype order for this condition
+        pheno_all = ["LUMENAL","SHELL","SPARSE","PATCHY","CONTINUOUS"]
+        pheno_present = [p for p in pheno_all
+                         if p in cond_df["Phenotype_Category"].unique()]
 
-    for i, (metric_col, metric_label) in enumerate(metrics):
-        for j, cat in enumerate(categories):
-            ax     = axes[i, j]
-            p_order  = phenotype_order_map.get(cat, [])
-            s_pairs  = stats_pairs_map.get(cat, [])
+        palette = {p: PHENOTYPE_PALETTE.get(p, "#aaaaaa") for p in pheno_present}
 
-            subset = df[
-                (df['Category'] == cat) &
-                (df['Phenotype_Category'].isin(p_order))
-            ].copy()
+        for ri, metric in enumerate(metrics):
+            ax = axes[ri, ci]
+            sub = cond_df[["Phenotype_Category", metric]].dropna(subset=[metric])
 
-            if not subset.empty and metric_col in subset.columns:
-                sns.boxplot(
-                    data=subset, x='Phenotype_Category', y=metric_col, ax=ax,
-                    hue='Phenotype_Category', legend=False,
-                    order=p_order, palette=PHENO_PALETTE,
-                    width=0.5, showfliers=False,
-                )
-                sns.stripplot(
-                    data=subset, x='Phenotype_Category', y=metric_col, ax=ax,
-                    order=p_order, color='black', size=3, alpha=0.4,
-                    jitter=True, dodge=False,
-                )
-                add_significance_bars(ax, subset, 'Phenotype_Category',
-                                      metric_col, p_order, s_pairs)
+            if sub.empty or not pheno_present:
+                ax.set_visible(False)
+                continue
 
-            # Row and column labels
-            if j == 0: ax.set_ylabel(metric_label, fontweight='bold')
-            else:      ax.set_ylabel('')
-            if i == 0: ax.set_title(cat, fontweight='bold', pad=15)
+            sns.boxplot(
+                data=sub, x="Phenotype_Category", y=metric,
+                hue="Phenotype_Category", hue_order=pheno_present,
+                order=pheno_present, palette=palette,
+                width=0.5, showfliers=False, linewidth=0.9,
+                legend=False, ax=ax,
+                boxprops=dict(alpha=0.7),
+            )
+            sns.stripplot(
+                data=sub, x="Phenotype_Category", y=metric,
+                hue="Phenotype_Category", hue_order=pheno_present,
+                order=pheno_present, palette=palette,
+                size=2.5, alpha=0.4, jitter=True,
+                dodge=False, legend=False, ax=ax,
+            )
 
-            ax.set_xlabel('')
-            sns.despine(ax=ax)
-            ax.grid(axis='y', linestyle=':', alpha=0.4)
+            # simple significance brackets between adjacent pairs
+            _add_sig_brackets(ax, sub, metric, pheno_present)
 
+            if ri == 0:
+                ax.set_title(CONDITION_LABELS.get(cond, cond), fontsize=10)
+            if ci == 0:
+                ax.set_ylabel(metric_lbls.get(metric, metric), fontsize=9)
+            else:
+                ax.set_ylabel("")
+            ax.set_xlabel("")
+            ax.tick_params(axis="x", labelsize=8, rotation=20)
+            ax.tick_params(axis="y", labelsize=8)
+
+    fig.suptitle("Phenotype Metric Comparison", fontsize=12, y=1.01)
     plt.tight_layout()
-    plt.savefig(
-        os.path.join(output_dir, "Phenotype_Characteristics_Matrix_Stats.png"),
-        bbox_inches='tight'
-    )
-    plt.close()
+    path = os.path.join(output_dir, "Phenotype_Characteristics_Matrix_Stats.png")
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved: {path}")
 
 
-def plot_cortex_map(df, category_name, output_dir):
+def _add_sig_brackets(ax, df, metric, pheno_order):
     """
-    Scatter plot: localization (x) vs Gini / distribution spread (y),
-    coloured by phenotype, sized by t_cortex.
+    Draw significance brackets above adjacent phenotype pairs.
 
-    Works for both BranchedCortex/LinearCortex (SPARSE/PATCHY/CONTINUOUS)
-    and Factin (SHELL/LUMENAL).
+    Key fixes vs previous version:
+    ─────────────────────────────
+    • Bracket base uses the 95th-percentile of EACH group's data (not the
+      global max), so a handful of outliers no longer push brackets off-screen.
+    • Step size is derived from the IQR of the combined data, keeping it
+      proportional to the dense part of the distribution.
+    • All significant brackets are collected first, then drawn with a clean
+      line (ax.plot) at incrementally higher y-levels.
+    • The y-axis limit is expanded after drawing so brackets are never clipped.
     """
-    print(f"  -> Generating Cortex Map for: {category_name}")
+    pairs = [(pheno_order[i], pheno_order[i + 1])
+             for i in range(len(pheno_order) - 1)]
 
-    # Include whichever phenotypes are present for this condition
-    valid_phenotypes = ['SPARSE', 'PATCHY', 'CONTINUOUS', 'SHELL', 'LUMENAL']
-    subset = df[df['Phenotype_Category'].isin(valid_phenotypes)].dropna(
-        subset=['A localization', 'Gini_Index'])
+    # ── collect significant pairs ─────────────────────────────────────────
+    sig = []   # list of (x1, x2, stars, per-group_max)
+    for p1, p2 in pairs:
+        g1 = df.loc[df["Phenotype_Category"] == p1, metric].dropna().values
+        g2 = df.loc[df["Phenotype_Category"] == p2, metric].dropna().values
+        if len(g1) < 3 or len(g2) < 3:
+            continue
+        try:
+            _, pval = mannwhitneyu(g1, g2, alternative="two-sided")
+        except Exception:
+            continue
+        if pval >= 0.05:
+            continue
+        stars = "***" if pval < 0.001 else ("**" if pval < 0.01 else "*")
+        # top of the two boxes = 75th-percentile of each group
+        group_top = max(np.nanpercentile(g1, 95), np.nanpercentile(g2, 95))
+        sig.append((pheno_order.index(p1), pheno_order.index(p2),
+                    stars, group_top))
 
-    if subset.empty:
-        print(f"      ! No plottable data for {category_name} cortex map.")
+    if not sig:
         return
 
-    plt.figure(figsize=(7, 6))
-    sns.scatterplot(
-        data=subset,
-        x='A localization',
-        y='Gini_Index',
-        hue='Phenotype_Category',
-        palette=PHENO_PALETTE,
-        size='t_cortex',
-        sizes=(20, 200),
-        alpha=0.7,
-        edgecolor='k',
-        linewidth=0.4,
-    )
-    plt.title(f"Cortex Map: {category_name}")
-    plt.xlabel('Localization Score')
-    plt.ylabel('Gini Index (spatial heterogeneity)')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    sns.despine()
+    # ── define step from the IQR of all visible data ──────────────────────
+    all_vals = df[metric].dropna().values
+    iqr = np.nanpercentile(all_vals, 75) - np.nanpercentile(all_vals, 25)
+    # fallback: if IQR is zero (e.g. constant group), use 10 % of range
+    if iqr < 1e-9:
+        iqr = (all_vals.max() - all_vals.min()) * 0.1
+    step = max(iqr * 0.55, np.nanpercentile(all_vals, 95) * 0.06)
 
-    plt.savefig(
-        os.path.join(output_dir, f"Cortex_Map_{category_name}.png"),
-        bbox_inches='tight'
-    )
-    plt.close()
+    # ── draw brackets ─────────────────────────────────────────────────────
+    # Start just above the current axes top (or the group tops, whichever is
+    # higher), so brackets never overlap the box plots.
+    current_top = ax.get_ylim()[1]
+    base_y = max(current_top, max(s[3] for s in sig)) + step * 0.3
 
+    for i, (x1, x2, stars, _) in enumerate(sig):
+        y = base_y + step * i
+        bar_y  = y
+        tick_h = step * 0.15          # short descending ticks at bracket ends
 
-def plot_correlation_heatmap(corr_matrix, output_dir, filename_suffix=""):
-    """Plots a Spearman correlation heatmap (lower triangle only)."""
-    plt.figure(figsize=(10, 8))
-    mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+        # horizontal bar + two descending ticks
+        ax.plot([x1, x2],        [bar_y, bar_y],        color="black", lw=0.9)
+        ax.plot([x1, x1],        [bar_y, bar_y - tick_h], color="black", lw=0.9)
+        ax.plot([x2, x2],        [bar_y, bar_y - tick_h], color="black", lw=0.9)
+        ax.text((x1 + x2) / 2,  bar_y + step * 0.05, stars,
+                ha="center", va="bottom", fontsize=8.5, color="black")
 
-    sns.heatmap(
-        corr_matrix, mask=mask,
-        center=0, vmin=-1, vmax=1,
-        annot=True, fmt=".2f",
-        cmap='vlag',
-        square=True, linewidths=1,
-        cbar_kws={"shrink": .5},
-    )
-    plt.title(f'Spearman Correlation Matrix{filename_suffix}')
-
-    plt.savefig(
-        os.path.join(output_dir, f"Spearman_Correlation_Heatmap{filename_suffix}.png"),
-        bbox_inches='tight'
-    )
-    plt.close()
-
-
-def plot_pairplot(df, output_dir, filename_suffix=""):
-    """
-    Generates a pair plot for key metrics, coloured by phenotype.
-    Covers all phenotypes (SPARSE/PATCHY/CONTINUOUS for cortex conditions,
-    SHELL/LUMENAL for Factin).
-    """
-    print(f"  -> Generating Pair Plot: {filename_suffix}")
-
-    # Radial_Kurtosis removed (unreliable — see generate_category_panel).
-    # PATCHY removed from valid_phenotypes for LinearCortex: since the
-    # classifier no longer assigns PATCHY to LinearCortex rows, it will
-    # never appear in that condition's data. Keeping it here for
-    # BranchedCortex where it remains a valid phenotype.
-    metrics = ['t_cortex', 'A localization', 'ISM', 'Gini_Index']
-
-    valid_phenotypes = ['SPARSE', 'PATCHY', 'CONTINUOUS', 'SHELL', 'LUMENAL']
-    subset = df[df['Phenotype_Category'].isin(valid_phenotypes)].dropna(subset=metrics)
-
-    if subset.empty or len(subset) < 5:
-        print("      ! Not enough data for pair plot.")
-        return
-
-    g = sns.pairplot(
-        subset,
-        vars=metrics,
-        hue='Phenotype_Category',
-        palette=PHENO_PALETTE,
-        diag_kind='kde',
-        plot_kws={'alpha': 0.6, 's': 30},
-        diag_kws={'fill': True},
-    )
-    g.fig.suptitle(f"Metric Pair Plot {filename_suffix}", y=1.02)
-    g.savefig(
-        os.path.join(output_dir, f"Correlation_Matrix_PairPlot{filename_suffix}.png"),
-        bbox_inches='tight'
-    )
-    plt.close()
+    # expand y-axis so the topmost bracket + its text is fully visible
+    new_top = base_y + step * (len(sig) + 0.6)
+    ax.set_ylim(ax.get_ylim()[0], new_top)

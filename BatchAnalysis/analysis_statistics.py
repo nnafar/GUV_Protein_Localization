@@ -182,16 +182,35 @@ def run_statistics(df, output_dir):
     """
     Runs all statistical analyses:
       1. Spearman correlation heatmap (overall)
-      2. Within-condition phenotype comparisons
+      2. Per-condition Spearman correlation heatmaps
+      3. Within-condition phenotype comparisons
     """
     print("\n--- Running Statistical Analysis ---")
 
     # 1. Global Spearman correlation matrix
-    #    Only numeric columns are included; text columns are skipped automatically.
     numeric_df = df.select_dtypes(include=[np.number])
     if not numeric_df.empty:
         corr_matrix = numeric_df.corr(method='spearman')
         plotting.plot_correlation_heatmap(corr_matrix, output_dir, "_Global")
 
-    # 2. Within-condition phenotype comparisons
+    # 2. Per-condition Spearman correlation matrices
+    #    Use the canonical order defined in plotting so figures are consistent.
+    condition_order = [c for c in plotting.CONDITION_ORDER
+                       if c in df['Category'].unique()]
+    for condition in condition_order:
+        cond_df = df[df['Category'] == condition].select_dtypes(include=[np.number])
+        if cond_df.empty:
+            continue
+        # Drop columns that are entirely NaN for this condition
+        cond_df = cond_df.dropna(axis=1, how='all')
+        if cond_df.shape[1] < 2:
+            continue
+        corr_matrix = cond_df.corr(method='spearman')
+        label = plotting.CONDITION_LABELS.get(condition, condition)
+        plotting.plot_correlation_heatmap(corr_matrix, output_dir,
+                                          f"_{condition}",
+                                          title=f"Spearman Correlation — {label}")
+        print(f"  -> Correlation heatmap saved for: {label}")
+
+    # 3. Within-condition phenotype comparisons
     run_phenotype_per_category_stats(df, output_dir)
