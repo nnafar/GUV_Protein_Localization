@@ -134,16 +134,16 @@ def load_and_process_data(root_path, categories):
         if col in master_df.columns:
             master_df[col] = pd.to_numeric(master_df[col], errors='coerce')
 
-    # ---- Filter 1: Remove vesicles with no valid raw radius ----
-    # A raw Radius of 0 or NaN means the Hough circle detection failed
-    # entirely — these rows have no meaningful data at all.
+    # ---- Filter 1: Raw Radius validity (still drop these -- no data exists) ----
+    # A Radius of 0 or NaN means Hough detection failed and there is no
+    # meaningful row to keep. These are genuinely missing observations.
     initial_count = len(master_df)
     master_df = master_df.dropna(subset=['Radius'])
     master_df = master_df[master_df['Radius'] > 0]
     removed_raw = initial_count - len(master_df)
-
     if removed_raw > 0:
-        print(f"\n  → Removed {removed_raw} vesicles with invalid raw Radius (0 or NaN)")
+        print(f"\n  → Removed {removed_raw} rows with invalid raw Radius (0 or NaN)")
+    
 
     # ---- Filter 2: Minimum physical size (Refined Radius) ----
     # The refined radius comes from membrane peak detection in skeleton.py
@@ -159,16 +159,18 @@ def load_and_process_data(root_path, categories):
     #
     # *** Keep MIN_VESICLE_RADIUS_UM in sync with
     #     'min_vesicle_radius_um' in main.py's ANALYSIS_CONFIG ***
-    MIN_VESICLE_RADIUS_UM = 3.06   # µm
+    MIN_VESICLE_RADIUS_UM = 2.50   # µm
 
-    if 'Refined Radius (um)' in master_df.columns:
-        before = len(master_df)
-        master_df = master_df.dropna(subset=['Refined Radius (um)'])
-        master_df = master_df[master_df['Refined Radius (um)'] >= MIN_VESICLE_RADIUS_UM]
-        removed_small = before - len(master_df)
-        if removed_small > 0:
-            print(f"  → Removed {removed_small} vesicles with refined radius "
-                  f"< {MIN_VESICLE_RADIUS_UM} µm or failed membrane detection")
+    # Boolean flag: True for vesicles that should be analysed for cortex/actin.
+    master_df['Shape_Quality_Flag'] = (
+        master_df['Refined Radius (um)'].notna() &
+        (master_df['Refined Radius (um)'] >= MIN_VESICLE_RADIUS_UM)
+    )
+    
+    n_excluded = (~master_df['Shape_Quality_Flag']).sum()
+    if n_excluded > 0:
+        print(f"  → Flagged {n_excluded} vesicles as size-EXCLUDED "
+              f"(refined radius NaN or < {MIN_VESICLE_RADIUS_UM} µm)")
 
     # ---- Summary ----
     print(f"\n  ✓ Total vesicles loaded: {len(master_df)}")

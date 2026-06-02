@@ -264,18 +264,14 @@ def calculate_deformability_score(intensity_profiles, along_radius, theta,
     RETURNS:
     --------
     dict with:
-        total_score           : float 0–1, overall shape quality
-        radial_bumpiness      : float 0–1, how much radius varies
-        sector_uniformity     : float 0–1, how uneven intensity is
-        clustering_risk       : float 0–1, risk of stuck vesicles
+        solidity              : float 0–1, polygon_area / convex_hull_area
+                                (1.0 = perfectly convex; lower = concavities)
         quality_flag          : str   'good' / 'acceptable' / 'questionable'
         radii_per_sector      : array of per-sector radius values (pixels)
         radii_per_sector_um   : array of per-sector radius values (µm)
-        intensities_per_sector: array of per-sector intensities
+        intensities_per_sector: array of per-sector intensities (visualisation only)
         mean_radius_um        : float, mean membrane radius in µm
         num_sectors           : int
-        coefficient_of_variation_radius   : float (dimensionless)
-        coefficient_of_variation_intensity: float (dimensionless)
     """
 
     # Compute sector data if not provided
@@ -284,98 +280,94 @@ def calculate_deformability_score(intensity_profiles, along_radius, theta,
             intensity_profiles, along_radius, theta, analysis_config
         )
 
-    # Pull thresholds from config
-    max_radius_cv    = analysis_config.get('max_radius_cv_threshold', 0.15)
-    max_intensity_cv = analysis_config.get('max_intensity_cv_threshold', 0.20)
-
-    # -----------------------------------------------------------------------
-    # COMPONENT 1 — Radial Bumpiness
-    # -----------------------------------------------------------------------
-    # How much does the membrane distance vary as you go around the circle?
-    # We use the Coefficient of Variation (CV) = std / mean.
-    # CV is dimensionless, so it works the same whether radii are in
-    # pixels or µm. A CV of 0.05 means 5% variation (very smooth).
-    #
-    # The score scales linearly from 0 (no variation) to 1.0
-    # (variation equal to max_radius_cv threshold).
-    # Anything above the threshold is clamped to 1.0 (maximally bumpy).
-
     radii_per_sector    = np.array([s['radius'] for s in sector_data])
     radii_per_sector_um = radii_per_sector * pixel_size
     mean_radius         = np.mean(radii_per_sector)
     mean_radius_um      = mean_radius * pixel_size
-
-    if mean_radius > 0:
-        cv_radius = np.std(radii_per_sector) / mean_radius
-    else:
-        cv_radius = 0.0
-
-    radial_component = min(cv_radius / max_radius_cv, 1.0)
-
-    # -----------------------------------------------------------------------
-    # COMPONENT 2 — Sector Uniformity
-    # -----------------------------------------------------------------------
-    # Are all sectors equally bright? Large variation suggests deformation
-    # or one side is pressed against something.
-    # Same CV logic as above, applied to intensity instead of radius.
-
-    intensities_per_sector = np.array([s['intensity'] for s in sector_data])
-    mean_intensity         = np.mean(intensities_per_sector)
-
-    if mean_intensity > 0:
-        sector_cv = np.std(intensities_per_sector) / mean_intensity
-    else:
-        sector_cv = 0.0
-
-    sector_component = min(sector_cv / max_intensity_cv, 1.0)
-
-    # -----------------------------------------------------------------------
-    # COMPONENT 3 — Clustering Risk
-    # -----------------------------------------------------------------------
-    # Sectors with more than one radial peak suggest two vesicles touching,
-    # or a "budding" event. We express risk as a fraction of total sectors.
-    # Multiplied by 2 so that even 50% of sectors having double peaks
-    # gives a maximum score of 1.0.
-
-    multi_peak_sectors  = sum(1 for s in sector_data if s['has_multiple_peaks'])
     num_sectors         = len(sector_data)
-    clustering_component = min(multi_peak_sectors / num_sectors * 2, 1.0)
+
+    # Intensity per sector is kept for the optional visualisation plot only —
+    # it is not written to the CSV.
+    intensities_per_sector = np.array([s['intensity'] for s in sector_data])
 
     # -----------------------------------------------------------------------
-    # COMBINED SCORE (weighted sum)
+    # SOLIDITY  (replaces the old weighted Deformability_Score)
     # -----------------------------------------------------------------------
-    # Radial bumpiness carries the most weight (50%) because it is the
-    # most direct measure of shape deviation.
-    # Sector uniformity (30%) catches deformations not reflected in radius.
-    # Clustering risk (20%) flags a specific artifact type.
+    # Solidity = polygon_area / convex_hull_area
+    #
+    # Imagine the 8 sector membrane positions as dots on a map.
+    # Connect them in order → you get an 8-sided polygon (the actual
+    # membrane outline).  Now stretch a rubber band around the outside
+    # → you get the convex hull.  Solidity asks:
+    #   "How much of the rubber-band area is actually filled by membrane?"
+    #
+    #   1.0  = perfectly convex (rubber band hugs the membrane exactly)
+    #   <1.0 = concavities present: dents, budding vesicles, aggregation
+    #
+    # A single sector that points inward (because a second vesicle is
+    # pressing in from outside) lowers solidity noticeably — exactly the
+    # kind of artefact we want to flag.
+    #
+    # Pull thresholds from analysis_config so they can be tuned in main.py
+    # without touching this file.
+    solidity_good_thresh       = analysis_config.get('solidity_good_threshold',       0.95)
+    solidity_acceptable_thresh = analysis_config.get('solidity_acceptable_threshold', 0.85)
 
-    total_score = (
-        0.5 * radial_component   +
-        0.3 * sector_component   +
-        0.2 * clustering_component
-    )
+    try:
+        from scipy.spatial import ConvexHull
 
-    # Assign a human-readable quality flag
-    if total_score < 0.15:
+        # Build the sector angles (in radians) from the sector data.
+        # Each sector_angle_range[0] is the START angle of that pie-slice.
+        angles_rad = np.array(
+            [s['sector_angle_range'][0] * np.pi / 180.0 for s in sector_data]
+        )
+
+        # Convert polar (r, θ) → Cartesian (x, y) for each sector
+        xs = radii_per_sector * np.cos(angles_rad)
+        ys = radii_per_sector * np.sin(angles_rad)
+
+        # Shoelace formula: area of the (ordered) polygon formed by the
+        # 8 membrane positions.
+        # Works because sectors are already in angular order (0° → 315°).
+        polygon_area = 0.5 * abs(
+            np.dot(xs, np.roll(ys, -1)) - np.dot(np.roll(xs, -1), ys)
+        )
+
+        # Convex hull area.  In scipy, ConvexHull.volume = area in 2-D.
+        hull = ConvexHull(np.column_stack([xs, ys]))
+        convex_area = hull.volume   # area for 2-D data
+
+        solidity = (polygon_area / convex_area) if convex_area > 0 else 1.0
+
+    except Exception:
+        # Graceful fallback: if the convex hull fails (e.g. all 8 sector
+        # radii are identical → degenerate polygon), assume perfect solidity
+        # so the vesicle is not incorrectly flagged.
+        solidity = 1.0
+
+    # Safety clamp — floating-point rounding can push values very slightly
+    # outside [0, 1]; clip to keep the value interpretable.
+    solidity = float(np.clip(solidity, 0.0, 1.0))
+
+    # Assign a human-readable quality flag.
+    # Note the direction is INVERTED relative to the old total_score:
+    #   total_score: higher = worse (deformation score)
+    #   solidity:    higher = better (1.0 = perfect sphere)
+    if solidity >= solidity_good_thresh:
         quality_flag = 'good'
-    elif total_score < 0.30:
+    elif solidity >= solidity_acceptable_thresh:
         quality_flag = 'acceptable'
     else:
         quality_flag = 'questionable'
 
     return {
-        'total_score'                      : total_score,
-        'radial_bumpiness'                 : radial_component,
-        'sector_uniformity'                : sector_component,
-        'clustering_risk'                  : clustering_component,
-        'quality_flag'                     : quality_flag,
-        'radii_per_sector'                 : radii_per_sector,
-        'radii_per_sector_um'              : radii_per_sector_um,
-        'intensities_per_sector'           : intensities_per_sector,
-        'mean_radius_um'                   : mean_radius_um,
-        'num_sectors'                      : num_sectors,
-        'coefficient_of_variation_radius'  : cv_radius,
-        'coefficient_of_variation_intensity': sector_cv,
+        'solidity'             : solidity,
+        'quality_flag'         : quality_flag,
+        'radii_per_sector'     : radii_per_sector,
+        'radii_per_sector_um'  : radii_per_sector_um,
+        'intensities_per_sector': intensities_per_sector,   # for visualisation
+        'mean_radius_um'       : mean_radius_um,
+        'num_sectors'          : num_sectors,
     }
 
 
@@ -448,13 +440,8 @@ def plot_sector_analysis(ves_id, sector_data, deform_score, along_radius,
 
     summary_text = (
         f"VESICLE {ves_id}: SHAPE ANALYSIS SUMMARY\n\n"
-        f"Overall Deformability Score: {deform_score['total_score']:.3f}"
+        f"Solidity: {deform_score['solidity']:.4f}"
         f"  ({deform_score['quality_flag'].upper()})\n"
-        f"  • Radial Bumpiness:   {deform_score['radial_bumpiness']:.3f}"
-        f"  (radius CV: {deform_score['coefficient_of_variation_radius']*100:.1f}%)\n"
-        f"  • Sector Uniformity:  {deform_score['sector_uniformity']:.3f}"
-        f"  (intensity CV: {deform_score['coefficient_of_variation_intensity']*100:.1f}%)\n"
-        f"  • Clustering Risk:    {deform_score['clustering_risk']:.3f}"
         f"  (sectors with mult. peaks: "
         f"{sum(1 for s in sector_data if s['has_multiple_peaks'])})\n\n"
         f"Radius per Sector (µm):\n"
@@ -500,8 +487,7 @@ def format_shape_metrics_for_csv(deform_score, sector_data):
     Converts deformability results into a flat list for CSV output.
 
     Returns values in this order (matching the column headers in skeleton.py):
-      [Deformability_Score, Radial_Bumpiness, Sector_Uniformity,
-       Clustering_Risk, Shape_Quality_Flag, Sector_Details]
+      [Solidity, Shape_Quality_Flag, Sector_Details]
 
     The Sector_Details field now reports the mean radius in µm
     (instead of pixels) so the value is interpretable without
@@ -514,19 +500,14 @@ def format_shape_metrics_for_csv(deform_score, sector_data):
 
     RETURNS:
     --------
-    list of 6 values ready to write as CSV columns
+    list of 3 values ready to write as CSV columns
     """
-    mean_radius_um   = float(np.mean(deform_score['radii_per_sector_um']))
-    n_multi_peak     = sum(1 for s in sector_data if s['has_multiple_peaks'])
+    mean_radius_um = float(np.mean(deform_score['radii_per_sector_um']))
 
     csv_values = [
-        round(float(deform_score['total_score']),        4),
-        round(float(deform_score['radial_bumpiness']),   4),
-        round(float(deform_score['sector_uniformity']),  4),
-        round(float(deform_score['clustering_risk']),    4),
+        round(float(deform_score['solidity']), 4),
         deform_score['quality_flag'],
-        # Compact summary string — radius now in µm, clearly labelled
-        f"sectors(r_mean_um={mean_radius_um:.2f},n_multi_peak={n_multi_peak})",
+        f"sectors(r_mean_um={mean_radius_um:.2f},n_sectors={deform_score['num_sectors']})",
     ]
 
     return csv_values

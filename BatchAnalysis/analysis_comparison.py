@@ -6,49 +6,7 @@ CROSS-CONDITION COMPARISON MODULE
 PURPOSE
 -------
 This module answers biological questions about your GUV data by comparing
-conditions systematically. It runs seven analyses:
-
-  1. OVERVIEW        — Summary statistics table (all conditions, all metrics)
-  2. RADIUS          — Do GUVs with cortices have a larger radius?
-  3. ACTIN (3-WAY)   — How do Branched, Linear, and F-actin differ on actin metrics?
-  4. LUMEN RETENTION — Does actin stay at the membrane or leak inside?
-                       (A Lumen/Bg ratio: BranchedCortex vs LinearCortex vs Factin)
-  5. SHAPE METRICS   — Do cortices physically deform GUVs?
-                       (Deformability, Bumpiness, Sector Uniformity: all 4 conditions)
-  6. STATISTICAL TESTS — Mann-Whitney U + Cliff's Delta for all comparisons above
-  7. PHENOTYPE-STRATIFIED — Branched vs Linear on CONTINUOUS vesicles only
-                             (removes confound of different phenotype distributions)
-
-ANALOGY
--------
-Think of your four conditions as four different fruit farms:
-  - Empty          -> plain soil (no crop, your negative control)
-  - Factin         -> a single tree planted (actin, no branching machinery)
-  - BranchedCortex -> a full orchard with many branching trees
-  - LinearCortex   -> a vineyard with long straight vines
-
-HOW TO USE
-----------
-Option A -- called from master_pipeline.py (recommended):
-  Add at the end of master_pipeline.py:
-
-      import analysis_comparison
-      analysis_comparison.run_comparison_analysis(df, results_dir)
-
-Option B -- run standalone:
-  1. Set STANDALONE_CSV_PATH below to your Master_Dataset_Combined.csv
-  2. Run:  python analysis_comparison.py
-
-OUTPUTS (saved to  <results_dir>/Comparison_Analysis/ )
--------
-  Comparison_Summary_Statistics.csv       -- median, mean, IQR for every metric
-  Comparison_Statistical_Tests.csv        -- p-values and effect sizes (all comparisons)
-  Plot_Radius_AllConditions.png           -- violin: radius across all 4 conditions
-  Plot_Cortex_vs_Empty_Radius.png         -- violin: cortex groups vs empty
-  Plot_Actin_ThreeWay.png                 -- 4-panel: Factin / Branched / Linear
-  Plot_LumenRetention.png                 -- lumen/bg ratio: 3 actin conditions
-  Plot_ShapeMetrics_AllConditions.png     -- deformability + bumpiness + uniformity
-  Plot_Phenotype_Stratified_Continuous.png -- CONTINUOUS-only Branched vs Linear
+conditions systematically.
 """
 
 import os
@@ -73,7 +31,6 @@ import plotting             # your existing plotting module (colours, styles)
 STANDALONE_CSV_PATH   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output\Batch_Analysis_Results\Master_Dataset_Combined.csv"
 STANDALONE_OUTPUT_DIR = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output\Batch_Analysis_Results"
 
-
 # =============================================================================
 # METRIC DEFINITIONS
 # =============================================================================
@@ -82,13 +39,16 @@ STANDALONE_OUTPUT_DIR = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\O
 # Key  = exact column name in the CSV
 # Value = human-readable label printed on the plot axis
 METRIC_LABELS = {
-    'Refined Radius (um)': 'Radius (um)',
+    'Refined Radius (um)': 'GUV radius (um)',
     'A localization':      'Localization Score',
     'Gini_Index':          'Gini Index',
     'ISM':                 'ISM',
     't_cortex':            'Cortex Thickness (um)',
     'A Lumen/Bg':          'Actin Lumen / Background',
-    'Solidity':            'Solidity',
+    'Deformability_Score': 'Deformability Score',
+    'Radial_Bumpiness':    'Radial Bumpiness',
+    'Sector_Uniformity':   'Sector Uniformity',
+    'Clustering_Risk':     'Clustering Risk',
 }
 
 # Metrics that only make sense for conditions WITH an actin channel.
@@ -101,7 +61,7 @@ LUMEN_METRICS = ['A Lumen/Bg']
 
 # Shape quality metrics -- meaningful for ALL conditions, because they come
 # from the membrane channel, not the actin channel.
-SHAPE_METRICS = ['Solidity']
+SHAPE_METRICS = ['Deformability_Score', 'Radial_Bumpiness', 'Sector_Uniformity']
 
 # Which conditions have an actin channel
 CONDITIONS_WITH_ACTIN = {'BranchedCortex', 'LinearCortex', 'Factin'}
@@ -238,124 +198,6 @@ def compute_summary_statistics(df, output_dir):
 
     # Print a pivot table (rows = conditions, columns = metrics) to the console
     print("\n      === Summary: Median values per condition ===")
-    try:
-        pivot = summary_df.pivot_table(
-            index='Condition', columns='Metric', values='Median'
-        )
-        pivot = pivot.reindex([
-            c for c in plotting.CONDITION_ORDER if c in pivot.index
-        ])
-        print(pivot.to_string())
-    except Exception:
-        print(summary_df.to_string())
-    print()
-
-    return summary_df
-
-
-# =============================================================================
-# STEP 1b -- SUMMARY STATISTICS: CORTEX-FORMING GUVs ONLY
-# =============================================================================
-
-def compute_summary_statistics_cortex_only(df, output_dir):
-    """
-    Same as compute_summary_statistics(), but EMPTY, LUMENAL, and EXCLUDED
-    GUVs are removed before computing any numbers.
-
-    WHY A SEPARATE CORTEX-ONLY STATS TABLE?
-    -----------------------------------------
-    In the full-population table, condition medians for actin metrics are
-    dominated by the EMPTY majority (whose cortex values are zero).  This
-    makes the medians look nearly identical across conditions — not because
-    the cortex architectures are similar, but because most GUVs had no cortex
-    at all.
-
-    This table answers: "For GUVs that DID form a cortex, what are the
-    actual metric distributions?"  Comparing this table with
-    Comparison_Summary_Statistics.csv lets you directly see how much the
-    EMPTY fraction was suppressing the full-population medians.
-
-    Analogy: comparing average salaries in two cities, once including all
-    residents (unemployed too) and once including employed workers only.
-    Both tables are informative — together they tell the whole story.
-
-    Parameters
-    ----------
-    df         : the master DataFrame (all vesicles, all conditions)
-    output_dir : folder where the CSV will be saved
-
-    Returns
-    -------
-    summary_df : DataFrame with one row per (condition, metric),
-                 computed on cortex-forming GUVs only.
-    """
-    print("  -> Computing cortex-forming-only summary statistics...")
-
-    if 'Phenotype_Category' not in df.columns:
-        print("      ! 'Phenotype_Category' not found — skipping cortex-only stats.")
-        return pd.DataFrame()
-
-    # Remove GUVs that failed to form a membrane-associated cortex.
-    # non_cortex matches the _NON_CORTEX_PHENOTYPES set in plotting.py
-    # — both must stay in sync if phenotype labels ever change.
-    non_cortex = {'EMPTY', 'LUMENAL', 'EXCLUDED'}
-    filtered   = df[~df['Phenotype_Category'].isin(non_cortex)].copy()
-
-    n_removed = len(df) - len(filtered)
-    print(f"      {n_removed:,} / {len(df):,} GUVs removed  "
-          f"→  {len(filtered):,} cortex-forming GUVs retained")
-
-    rows = []
-
-    for condition in plotting.CONDITION_ORDER:
-
-        if condition not in filtered['Category'].unique():
-            continue
-
-        cond_df = filtered[filtered['Category'] == condition].copy()
-
-        # N_Total = full-population count for this condition (before filtering).
-        # Showing both N values lets you calculate the cortex-formation rate:
-        #   cortex_formation_rate = N_CortexForming / N_Total
-        n_total = int((df['Category'] == condition).sum())
-
-        for metric, label in METRIC_LABELS.items():
-
-            if metric not in cond_df.columns:
-                continue
-
-            values = cond_df[metric].dropna()
-
-            if len(values) < 3:
-                continue
-
-            rows.append({
-                'Condition':       condition,
-                'Metric':          label,
-                # How many cortex-forming GUVs contributed to these stats
-                'N_CortexForming': int(len(values)),
-                # Full-population N — for computing cortex-formation rate
-                'N_Total':         n_total,
-                'Median':          round(float(values.median()),       3),
-                'Mean':            round(float(values.mean()),         3),
-                'Std_Dev':         round(float(values.std()),          3),
-                'IQR_25':          round(float(values.quantile(0.25)), 3),
-                'IQR_75':          round(float(values.quantile(0.75)), 3),
-            })
-
-    summary_df = pd.DataFrame(rows)
-
-    if summary_df.empty:
-        print("      ! No data remaining after filter — CSV not saved.")
-        return summary_df
-
-    path = os.path.join(output_dir,
-                        "Comparison_Summary_Statistics_CortexOnly.csv")
-    summary_df.to_csv(path, index=False)
-    print(f"      -> Saved: {path}")
-
-    # Console pivot — quick sanity check that medians shifted up from zero
-    print("\n      === Cortex-forming GUVs only: Median values per condition ===")
     try:
         pivot = summary_df.pivot_table(
             index='Condition', columns='Metric', values='Median'
@@ -590,36 +432,15 @@ def run_comparison_analysis(df, output_dir):
     Steps
     -----
     1.  Create Comparison_Analysis sub-folder
-    2.  Summary statistics CSV           (full population)
-    2b. Summary statistics CSV           (cortex-forming GUVs only)
-    3.  Statistical tests CSV            (5 analysis groups)
+    2.  Summary statistics CSV
+    3.  Statistical tests CSV  (5 analysis groups)
     4.  Plot A: Radius (all conditions)        → plotting.plot_radius_all_conditions
     5.  Plot B: Radius (cortex vs empty)       → plotting.plot_cortex_vs_empty_radius
     6.  Plot C: Actin metrics three-way        → plotting.plot_actin_three_way
-    6b. Plot C': Actin metrics three-way       → plotting.plot_actin_three_way_cortex_only
-                 (EMPTY + LUMENAL excluded)
     7.  Plot D: Lumen retention (A Lumen/Bg)   → plotting.plot_lumen_retention
-    7b. Plot D': Lumen retention               → plotting.plot_lumen_retention_cortex_only
-                 (EMPTY + LUMENAL excluded)
     8.  Plot E: Phenotype-stratified (CONT.)   → plotting.plot_phenotype_stratified
-    9.  Plot F: Batch actin metrics (cortex-forming only)
-                → plotting.plot_batch_actin_metrics_cortex_only
-                  (called from analysis_batch.run_batch_analysis,
-                   where Batch_Label is available)
 
-    WHY CORTEX-ONLY COMPANIONS?
-    ---------------------------
-    In both nucleated conditions (BranchedCortex, LinearCortex), the majority
-    of GUVs fail to form a membrane cortex (EMPTY phenotype).  Their actin
-    metrics are all zero, which dominates the population median and can mask
-    real differences in cortex architecture.
-
-    The companion figures (steps 6b, 7b, 9) remove EMPTY + LUMENAL GUVs
-    before plotting, so medians reflect only GUVs that actually formed a
-    membrane-associated structure.  The footnote on each figure states exactly
-    how many GUVs were removed, making the filtering transparent.
-
-    All plot functions live in plotting.py (Sections 12-13).
+    All plot functions live in plotting.py (Section 12).
     This function handles only orchestration and CSV generation.
 
     Parameters
@@ -634,7 +455,7 @@ def run_comparison_analysis(df, output_dir):
 
     plotting.set_paper_style()
 
-    # Minimum column check — bail early with a clear message if data is missing
+    # Minimum column check
     if 'Category' not in df.columns:
         print("  ! 'Category' column not found. Cannot run comparison analysis.")
         return
@@ -643,33 +464,16 @@ def run_comparison_analysis(df, output_dir):
         return
 
     # ── CSV outputs (statistics stay in this module) ─────────────────────────
-    # Full-population summary (includes EMPTY, LUMENAL, etc.)
     compute_summary_statistics(df, comp_dir)
-
-    # Cortex-forming-only summary (EMPTY + LUMENAL excluded).
-    # Comparing the two CSVs directly shows how much the non-forming
-    # fraction was suppressing the full-population medians.
-    compute_summary_statistics_cortex_only(df, comp_dir)
-
     run_comparison_tests(df, comp_dir)
 
-    # ── Full-population plots ─────────────────────────────────────────────────
-    # These use ALL GUVs (including EMPTY and LUMENAL).  They show the true
-    # population distribution as it is — useful for phenotype composition
-    # context and radius comparisons where EMPTY is a valid group.
+    # ── Plot outputs (all visual functions live in plotting.py) ───────────────
     plotting.plot_radius_all_conditions(df, comp_dir)
     plotting.plot_cortex_vs_empty_radius(df, comp_dir)
     plotting.plot_actin_three_way(df, comp_dir)
     plotting.plot_lumen_retention(df, comp_dir)
     plotting.plot_phenotype_stratified(df, comp_dir)
 
-    # ── Cortex-forming-only companion plots ──────────────────────────────────
-    # These exclude EMPTY and LUMENAL GUVs before plotting.  They answer:
-    # "Among GUVs that DID form a cortex, how do the conditions differ?"
-    # Each figure carries an italic footnote with the N removed count.
-    print("\n  [Cortex-forming-only companion figures]")
-    plotting.plot_actin_three_way_cortex_only(df, comp_dir)
-    plotting.plot_lumen_retention_cortex_only(df, comp_dir)
     print("  -> Comparison Analysis Complete.\n")
 
 

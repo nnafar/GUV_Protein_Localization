@@ -146,14 +146,20 @@ ANALYSIS_CONFIG = {
     # as two separate peaks (rather than two sides of the same peak).
     'sector_peak_min_distance_px': 3,
 
-    # Radius coefficient-of-variation (CV = std/mean) at which the
-    # radial-bumpiness score equals 1.0 (maximum bumpiness).
-    # 0.15 = a 15% variation in radius is considered "fully bumpy".
-    # Lower this to make the score stricter; raise it to be more lenient.
-    'max_radius_cv_threshold': 0.15,
 
-    # Intensity CV at which sector-uniformity score equals 1.0.
-    'max_intensity_cv_threshold': 0.40,
+    # ------------------------------------------------------------------
+    # SHAPE ANALYSIS — Solidity thresholds
+    # ------------------------------------------------------------------
+    # Solidity = polygon_area / convex_hull_area  (computed from sector radii)
+    #   1.0   = perfectly convex (ideal sphere)
+    #   < 1.0 = concavities: dents, budding, touching vesicles
+    #
+    # 'good'         → solidity ≥ solidity_good_threshold
+    # 'acceptable'   → solidity ≥ solidity_acceptable_threshold
+    # 'questionable' → solidity <  solidity_acceptable_threshold
+    #                  (triggers a comment in the CSV)
+    'solidity_good_threshold':        0.95,
+    'solidity_acceptable_threshold':  0.85,
 
     # ------------------------------------------------------------------
     # OUTPUT OPTIONS

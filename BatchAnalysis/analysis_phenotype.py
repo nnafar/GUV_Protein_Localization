@@ -15,6 +15,15 @@ CHANGES FROM PREVIOUS VERSION:
 3. Factin uses SHELL and LUMENAL only.
 
 4. Empty vesicles are labelled EMPTY (no actin analysis is meaningful).
+
+5. NEW: All four classifiers now check 'Shape_Quality_Flag' as their first
+   step. Vesicles whose refined radius is NaN or below the threshold set in
+   file_handling.py are labelled EXCLUDED in every condition — including
+   Empty, which previously had no EXCLUDED branch at all. This makes the
+   per-condition EXCLUDED counts directly comparable and gives an honest
+   accounting of how many vesicles were sub-resolution in each preparation.
+   The fall-through default of True keeps the classifiers robust against
+   re-runs on older CSVs that lack the flag column.
 """
 
 import pandas as pd
@@ -32,14 +41,20 @@ def _classify_branched_cortex(row):
     Classifies a single BranchedCortex vesicle row.
 
     Decision tree:
-    ─ Is t_cortex NaN?          → EXCLUDED  (analysis failed for this vesicle)
+    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed for this vesicle)
     ─ Is localization <= 0?
-        ─ Is lumen/bg <= 2?     → EMPTY     (no actin anywhere)
-        ─ Otherwise             → LUMENAL   (actin is inside, not on membrane)
-    ─ Is localization <= 0.65?  → SPARSE    (some cortex but not dense)
-    ─ Is gini > 0.45?           → PATCHY    (dense but uneven / clustered)
-    ─ Otherwise                 → CONTINUOUS (dense and uniform cortex)
+        ─ Is lumen/bg <= 2?        → EMPTY     (no actin anywhere)
+        ─ Otherwise                → LUMENAL   (actin is inside, not on membrane)
+    ─ Is localization <= 0.65?     → SPARSE    (some cortex but not dense)
+    ─ Is gini > 0.45?              → PATCHY    (dense but uneven / clustered)
+    ─ Otherwise                    → CONTINUOUS (dense and uniform cortex)
     """
+    # Size-based exclusion comes first. .get() default True means the
+    # classifier still works on CSVs that pre-date the flag column.
+    if not row.get('Shape_Quality_Flag', True):
+        return "EXCLUDED"
+
     if pd.isna(row.get('t_cortex')):
         return "EXCLUDED"
 
@@ -51,7 +66,7 @@ def _classify_branched_cortex(row):
         return "EMPTY" if lumen_ratio <= 2.0 else "LUMENAL"
     if loc <= 0.65:          # <-- TUNE THIS if needed for BranchedCortex
         return "SPARSE"
-    return "PATCHY" if gini > 0.45 else "CONTINUOUS"  
+    return "PATCHY" if gini > 0.45 else "CONTINUOUS"
 
 
 def _classify_linear_cortex(row):
@@ -59,12 +74,13 @@ def _classify_linear_cortex(row):
     Classifies a single LinearCortex vesicle row.
 
     PHENOTYPES (3 only — PATCHY is intentionally absent):
-    ─ Is t_cortex NaN?          → EXCLUDED  (analysis failed)
+    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed)
     ─ Is localization <= 0?
-        ─ Is lumen/bg <= 2?     → EMPTY     (no actin anywhere)
-        ─ Otherwise             → LUMENAL   (actin inside, not at membrane)
-    ─ Is localization <= 0.65?  → SPARSE    (partial cortex)
-    ─ Otherwise                 → CONTINUOUS (well-formed linear cortex)
+        ─ Is lumen/bg <= 2?        → EMPTY     (no actin anywhere)
+        ─ Otherwise                → LUMENAL   (actin inside, not at membrane)
+    ─ Is localization <= 0.65?     → SPARSE    (partial cortex)
+    ─ Otherwise                    → CONTINUOUS (well-formed linear cortex)
 
     WHY NO PATCHY:
     Linear actin networks (formins, fascin bundles) do not form the discrete
@@ -76,6 +92,9 @@ def _classify_linear_cortex(row):
     The localization threshold of 0.65 reflects the natural valley between
     the two peaks visible in the A localization KDE (~0.50 and ~0.85).
     """
+    if not row.get('Shape_Quality_Flag', True):
+        return "EXCLUDED"
+
     if pd.isna(row.get('t_cortex')):
         return "EXCLUDED"
 
@@ -99,13 +118,21 @@ def _classify_factin(row):
     LUMENAL  — Actin is distributed throughout the vesicle interior.
                Indicated by a low localization score but detectable lumen signal.
 
-    If analysis failed (t_cortex is NaN), returns EXCLUDED.
+    Decision tree:
+    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed)
+    ─ Is localization NaN?         → EXCLUDED  (localization not computed)
+    ─ Is localization > 0.30?      → SHELL
+    ─ Otherwise                    → LUMENAL
 
     *** TUNE THE THRESHOLD BELOW ***
     A localization score > 0.30 is used as the default cut-off for SHELL.
     This means: "at least 30% more actin at the membrane than in the lumen."
     Inspect your data and adjust if needed.
     """
+    if not row.get('Shape_Quality_Flag', True):
+        return "EXCLUDED"
+
     if pd.isna(row.get('t_cortex')):
         return "EXCLUDED"
 
@@ -122,9 +149,20 @@ def _classify_factin(row):
 
 def _classify_empty(row):
     """
-    Empty vesicles contain no actin. Every vesicle in this condition
-    is labelled EMPTY regardless of any other column values.
+    Empty vesicles contain no actin, so the only meaningful distinction is
+    whether they passed the size analysability threshold.
+
+    Decision tree:
+    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
+    ─ Otherwise                    → EMPTY
+
+    Note: the EXCLUDED branch is necessary here even though Empty has no
+    actin channel, because we want the per-condition EXCLUDED counts to
+    reflect size failures consistently across all four conditions.
     """
+    if not row.get('Shape_Quality_Flag', True):
+        return "EXCLUDED"
+
     return "EMPTY"
 
 
@@ -177,8 +215,9 @@ def run_phenotype_analysis(df, output_dir):
     """
     Runs the full phenotype analysis pipeline:
       1. Classifies every vesicle
-      2. Saves a CSV with the classifications
-      3. Generates all phenotype plots
+      2. Reports the EXCLUDED count per condition (size + actin failures combined)
+      3. Saves a CSV with the classifications
+      4. Generates all phenotype plots
     """
     print("\n--- Running Phenotype Analysis (4 Conditions) ---")
 
@@ -188,10 +227,29 @@ def run_phenotype_analysis(df, output_dir):
     # 1. Classify every vesicle
     categorize_vesicles(df)
 
-    # 1a. Save detailed assignments to CSV
+    # 1a. Report EXCLUDED counts per condition (size + actin failures combined)
+    if 'Shape_Quality_Flag' in df.columns:
+        print("\n  EXCLUDED breakdown per condition (size + actin failures):")
+        for cat in plotting.CONDITION_ORDER:
+            cond = df[df['Category'] == cat]
+            if cond.empty:
+                continue
+            n_total      = len(cond)
+            n_size_fail  = (~cond['Shape_Quality_Flag']).sum()
+            n_excluded   = (cond['Phenotype_Category'] == 'EXCLUDED').sum()
+            # Vesicles labelled EXCLUDED but with a valid size flag are actin
+            # analysis failures (only happens in actin-containing conditions).
+            n_actin_fail = n_excluded - n_size_fail
+            pct = 100 * n_excluded / n_total if n_total > 0 else 0
+            print(f"      {cat:>15} : "
+                  f"size_fail={n_size_fail:>4}  "
+                  f"actin_fail={n_actin_fail:>4}  "
+                  f"total_excluded={n_excluded:>4} / {n_total} ({pct:.1f}%)")
+
+    # 1b. Save detailed assignments to CSV
     detailed_path = os.path.join(output_dir, "Vesicle_Phenotype_Assignments.csv")
     df.to_csv(detailed_path, index=False)
-    print(f"  -> Phenotype assignments saved: {detailed_path}")
+    print(f"\n  -> Phenotype assignments saved: {detailed_path}")
 
     # Print a quick summary to the terminal
     print("\n  Phenotype counts per condition:")
@@ -213,17 +271,14 @@ def run_phenotype_analysis(df, output_dir):
     if not df_phenotyped.empty:
         plotting.generate_category_panel(df_phenotyped, output_dir)
 
-    # 4. Per-condition scatter maps and pair plots
+    # 4. Per-condition corrplot pair plots
     #    (only where we have meaningful phenotype variation)
     for condition in conditions_with_phenotypes:
         cond_df = df[df['Category'] == condition]
         if cond_df.empty:
             continue
 
-        # 5D scatter map: localization vs Gini, coloured by phenotype, sized by t_cortex
-        plotting.plot_cortex_map(cond_df, condition, output_dir)
-
-        # Pair plot of key metrics
+        # Combined corrplot: scatter (lower) + KDE (diagonal) + r= squares (upper)
         plotting.plot_pairplot(cond_df, output_dir, filename_suffix=f"_{condition}")
 
     print("  -> Phenotype Analysis Complete.")

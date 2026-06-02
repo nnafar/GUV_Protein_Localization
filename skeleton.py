@@ -214,8 +214,7 @@ def create_output_file(final_output_path, proteins_present):
     # These columns are ALWAYS computed, regardless of which proteins are
     # present.  They come from the membrane channel only.
     membrane_only_headers = [
-        "Deformability_Score", "Radial_Bumpiness", "Sector_Uniformity",
-        "Clustering_Risk", "Shape_Quality_Flag", "Sector_Details",
+        "Solidity", "Shape_Quality_Flag", "Sector_Details",
         "Refined Radius (um)", "Comment",
     ]
 
@@ -918,7 +917,9 @@ def localization(num_channels, angular_profiles, radial_profiles,
         median_memb  = np.median(memb_angular)
 
         lumen_radial = radial_profiles[0:index_centre, prot_idx]
-        mu_lumen     = np.mean(lumen_radial)
+        mu_lumen     = np.median(lumen_radial)   # Median is more robust than mean against
+                                                 # bright outlier pixels (e.g. a stray actin
+                                                 # filament passing through the lumen region).
         sigma_lumen  = np.std(lumen_radial)
         lumen_intensity_res[i] = mu_lumen
 
@@ -1320,7 +1321,7 @@ def format_result_row(exp_info, ves_coordinates, background, localization,
         list_shape_metrics = format_shape_metrics_for_csv(shape_deform_dict,
                                                           shape_sector_data)
     else:
-        list_shape_metrics = [np.nan, np.nan, np.nan, np.nan, "N/A", "N/A"]
+        list_shape_metrics = [np.nan, "N/A", "N/A"]
 
     vesicle_row = (list_exp_info + list_ves_coordinates +
                    list_background + list_localization +
@@ -1473,7 +1474,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
 
         if deform_score['quality_flag'] == 'questionable':
             comment.append(
-                f"questionable_shape_{deform_score['total_score']:.2f}")
+                f"questionable_shape_sol{deform_score['solidity']:.4f}")
 
         # Uncomment to save detailed sector plots for every vesicle:
         # plot_sector_analysis(int(ves_coordinates[0]), sector_data,
@@ -1514,7 +1515,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
         background       = np.zeros((1, num_channels))
         localization_val = np.zeros(num_channels - 1)
         # lumen_val already initialised at the top of this function
-        comment += comment_peak
+        comment = comment_peak
         comment_final = [', '.join(comment)] if comment else ["OK"]
         row = format_result_row(
             exp_info, ves_coordinates, background, localization_val,
