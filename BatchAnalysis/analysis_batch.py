@@ -2,33 +2,6 @@
 """
 BATCH ANALYSIS MODULE
 Detects and visualises batch-to-batch variability within each condition.
-
-WHY DOES BATCH VARIABILITY MATTER?
-------------------------------------
-Even if you run the same experiment perfectly twice, the results will
-vary slightly between runs. Sources of variation include:
-  - Slightly different GUV preparation conditions
-  - Day-to-day microscope alignment differences
-  - Different protein stock concentrations
-
-This module helps you:
-  1. SEE whether your batches are internally consistent
-     (small spread between batches = reproducible experiment)
-  2. SPOT a problematic batch that is an outlier
-     (maybe something went wrong that day)
-  3. DECIDE whether it is safe to pool batches together for statistics
-
-ANALOGY:
-Imagine you bake the same cake recipe five times on five different days.
-This module puts all five cakes side by side, measures their height,
-colour, and density, and draws a chart so you can immediately see if
-one batch turned out very different from the others.
-
-HOW IT INTEGRATES:
-  file_handling.py  → adds a 'Batch_ID' column  (e.g. '260208_BranchedCortex_1')
-  analysis_batch.py → uses that column to group vesicles by experiment run
-  plotting.py       → draws the per-condition and overview batch plots
-  master_pipeline.py → calls run_batch_analysis() at the end of the pipeline
 """
 
 import os
