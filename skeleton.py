@@ -46,6 +46,13 @@ import cv2
 import tifffile
 import warnings
 
+# AnchoredSizeBar draws a "scale bar" (a little ruler) directly onto an
+# image Axes — the same trick microscopy software uses to show "5 um" in
+# the corner of a picture. It ships with matplotlib itself, so no new
+# package needs to be installed.
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+from matplotlib.font_manager import FontProperties
+
 from guve_shape_analysis import (
     analyze_vesicle_sectors,
     calculate_deformability_score,
@@ -92,8 +99,18 @@ def create_directory_structure(path_to_output_root, exp_info, dataset_name=""):
     Example result:
       Output/260208_BranchedCortex_1/Region0000/
       Output/260208_BranchedCortex_2/Region0000/
+
+    DEFENSIVE FIX: dataset_name and region_id are stripped of leading/
+    trailing whitespace before being used as folder names. A stray space
+    at the end of a string like "260227_Empty_1 " is invisible in an
+    editor, but Windows' folder-creation API rejects folder names that
+    end in a space or period — os.makedirs then fails with a confusing
+    "WinError 3: path not found" even though the parent folder is fine.
+    Stripping here means a typo like that one line in main.py can no
+    longer break directory creation.
     """
-    region_id = exp_info[1]
+    dataset_name = str(dataset_name).strip()
+    region_id    = str(exp_info[1]).strip()
 
     final_output_path = os.path.join(
         path_to_output_root,
@@ -158,7 +175,14 @@ def read_files(path_membrane, path_septin, path_actin, path_detected,
         channels_data = channels_data[:, :, np.newaxis]
 
     # 4. Read detected vesicles CSV
-    csv_path = os.path.join(path_detected, file_stem + "-detected_vesicles.csv")
+    #
+    # FIX: the detection step stamps its output CSV with the same "-C1"
+    # membrane-channel tag used for the membrane TIFF itself (see c1_path
+    # a few lines above: file_stem + "-C1.tif"). This file name pattern
+    # previously omitted that tag, so it always missed the real file:
+    #     looking for : <file_stem>-detected_vesicles.csv
+    #     actually on disk: <file_stem>-C1_detected_vesicles.csv
+    csv_path = os.path.join(path_detected, file_stem + "-C1_detected_vesicles.csv")
 
     if not os.path.exists(csv_path):
         print(f"  SKIPPING {file_stem}: No detected_vesicles.csv found")
@@ -264,6 +288,107 @@ def create_output_file(final_output_path, proteins_present):
     return output_csv_path
 
 
+def create_radial_profile_csv(final_output_path):
+    """
+    Creates an empty CSV file (just the header row) that will store the
+    radially-averaged membrane and actin intensity profile for EVERY
+    vesicle in this region.
+
+    THE ANALOGY: think of Analysis_Results.csv as each vesicle's "report
+    card" — one row, one final score per vesicle. This new file is more
+    like each vesicle's full "growth chart" — every individual measurement
+    point (one row per radius value) that the final score was calculated
+    from. That's why this file ends up with MANY more rows than
+    Analysis_Results.csv: hundreds of radius points per vesicle, instead
+    of just one summary row.
+
+    We deliberately keep this file's columns minimal ("Vesicle id",
+    "radius_um", "Membrane_Intensity", "Actin_Intensity") because it lives
+    in the exact same per-region output folder as Analysis_Results.csv.
+    When you later load both files together (see file_handling.py's
+    `load_radial_profiles`), the folder name itself already tells you the
+    Category/Batch_ID/Region_ID — exactly how Analysis_Results.csv is
+    already being tagged today. "Vesicle id" is then the only column you
+    need in order to join the two files together later.
+
+    Parameters
+    ----------
+    final_output_path : str — the same per-region output folder that
+                         Analysis_Results.csv is written into.
+
+    Returns
+    -------
+    str — full path to the newly created (header-only) CSV file.
+    """
+    column_headers = ["Vesicle id", "radius_um", "Membrane_Intensity", "Actin_Intensity"]
+    output_csv_path = os.path.join(final_output_path, "Radial_Intensity_Profiles.csv")
+
+    with open(output_csv_path, "w", newline='') as output_file:
+        writer = csv.DictWriter(output_file, delimiter=',', fieldnames=column_headers)
+        writer.writeheader()
+
+    return output_csv_path
+
+
+def format_radial_profile_rows(vesicle_id, along_radius, radial_profiles,
+                                pixel_size, proteins_present):
+    """
+    Turns ONE vesicle's radial profile array into a list of CSV-ready rows
+    — one row per radius sample point.
+
+    WHY A LIST OF ROWS (instead of one row, like format_result_row)?
+    Analysis_Results.csv summarises a whole vesicle in a single row. Here
+    we want to keep every individual point along the radial profile curve
+    (the same curve that gets drawn in the "Int_prof_Radial" plots), so we
+    need one row PER POINT, not one row per vesicle.
+
+    CHANNEL ORDER REMINDER (matches the rest of this file):
+        radial_profiles[:, 0]  -> membrane channel   (always first)
+        radial_profiles[:, -1] -> actin channel      (always last, even
+                                  when a septin channel sits in between
+                                  for the "both_proteins" case)
+    If this particular run has no actin channel at all (e.g. the Empty
+    condition, or a septin-only run), we still write a row per radius
+    point, but fill the Actin_Intensity column with NaN rather than
+    silently writing the wrong channel's numbers into it.
+
+    Parameters
+    ----------
+    vesicle_id       : int   — this vesicle's ID number (ves_coordinates[0])
+    along_radius     : array — radius values, in PIXELS (same array already
+                       used everywhere else, e.g. to build radius_um)
+    radial_profiles  : array, shape (n_points, n_channels) — the
+                       angle-averaged intensity profile for this vesicle
+    pixel_size       : float — micrometres per pixel
+    proteins_present : array of 2 bools, (Septin, Actin) — tells us
+                       whether an actin channel actually exists
+
+    Returns
+    -------
+    list of lists — each inner list is one CSV row:
+        [vesicle_id, radius_um, membrane_intensity, actin_intensity]
+    """
+    radius_um          = along_radius * pixel_size
+    membrane_intensity = radial_profiles[:, 0]
+
+    if proteins_present[1]:  # Actin == True for this run
+        actin_intensity = radial_profiles[:, -1]
+    else:
+        # No actin channel this run -> don't write a misleading number
+        # (e.g. the septin channel) into the Actin_Intensity column.
+        actin_intensity = np.full_like(membrane_intensity, np.nan)
+
+    rows = []
+    for r, m, a in zip(radius_um, membrane_intensity, actin_intensity):
+        rows.append([
+            vesicle_id,
+            round(float(r), 4),
+            round(float(m), 4),
+            round(float(a), 4) if not np.isnan(a) else np.nan,
+        ])
+    return rows
+
+
 # =============================================================================
 # COLORMAPS
 # =============================================================================
@@ -292,6 +417,125 @@ def color_maps():
         cmap_yellow = LinearSegmentedColormap.from_list(
             "cmap_yellow", list(zip([0.0, 1.0], ["black", "yellow"])))
         plt.colormaps.register(cmap=cmap_yellow)
+
+
+# =============================================================================
+# SCALE BAR HELPER
+# =============================================================================
+
+def add_scale_bar(ax, pixel_size, length_um=5, color='white', location='lower right',
+                   show_label=True):
+    """
+    Draws a small horizontal "ruler" (a scale bar) onto an image Axes,
+    optionally with a label underneath it (e.g. "5 um").
+
+    THE ANALOGY: this is exactly like the little scale bar you see printed
+    in the corner of a map ("1 cm = 10 km") — it tells the reader how to
+    convert a length on the picture into a real physical distance, without
+    needing axis tick numbers on the image itself.
+
+    Parameters
+    ----------
+    ax         : matplotlib Axes — the image panel to draw the bar on
+                 (e.g. the Axes that just did ax.imshow(...)).
+    pixel_size : float — how many micrometres (um) one pixel represents.
+                 This is the SAME `pixel_size` value already used everywhere
+                 else in this file (e.g. `radius_um = along_radius * pixel_size`).
+    length_um  : float — the real-world length the bar should represent.
+                 Defaults to 5, since that's what we want for the
+                 Int_prof_Radial / Int_prof_Angular figures.
+    color      : str — colour of the bar and its text. 'white' shows up
+                 well on the dark microscopy images used here.
+    location   : str — corner of the Axes to place the bar in. Matplotlib
+                 understands plain-English corner names like 'lower right'.
+    show_label : bool — if True (default), draws the "5 µm" text under the
+                 bar, same as before. If False, draws ONLY the bar itself
+                 with no text — used for the small representative crop
+                 images (save_channel_crops), where a text label would
+                 take up too much space relative to the tiny image.
+
+    Returns
+    -------
+    None — the bar is added directly onto `ax` as a side effect.
+    """
+    # A scale bar that represents `length_um` micrometres needs to be drawn
+    # `length_um / pixel_size` pixels long, because pixel_size is "um per
+    # pixel" (e.g. 0.05 um/pixel -> 5 um needs 100 pixels of width).
+    length_px = length_um / pixel_size
+
+    label_text = f"{length_um} \u00b5m" if show_label else ""
+    fontprops  = FontProperties(size=10)
+    scale_bar = AnchoredSizeBar(
+        ax.transData,          # use the image's own pixel coordinates
+        length_px,              # length of the bar, in those pixel units
+        label_text,              # "5 µm", or "" to draw the bar only
+        location,
+        pad=0.3,
+        sep=2 if show_label else 0,  # no gap to reserve when there's no text
+        color=color,
+        frameon=False,          # no background box behind the bar
+        size_vertical=length_px * 0.08,  # makes the bar a thin filled rectangle
+        fontproperties=fontprops,
+    )
+    ax.add_artist(scale_bar)
+
+
+def save_channel_crops(vesicle_id, image_box, channels, path_to_output, pixel_size):
+    """
+    Saves each requested channel of `image_box` as its OWN standalone
+    cropped image file (with a 5 um scale bar), separate from the
+    multi-panel Int_prof_Radial/Angular figures.
+
+    WHY THIS EXISTS: the Int_prof_Radial/Angular figures are great for
+    QC'ing one vesicle's analysis, but they bundle the curve + both channel
+    thumbnails + text into one crowded image. Later (at the batch/master
+    pipeline level, once phenotypes are known), we want to grab just the
+    clean little membrane/actin crop for a handful of REPRESENTATIVE
+    vesicles — e.g. "show me what a typical Continuous BranchedCortex
+    vesicle's actin channel looks like." That selection step lives in
+    analysis_phenotype.py and runs long after this file is written, so it
+    can only "ask for" an image that was already saved to disk under a
+    predictable name. This function is what creates that file.
+
+    NAMING CONVENTION: "Vesicle_{vesicle_id}_{channel_name}_Crop.png",
+    saved into the SAME per-region folder as everything else for this
+    vesicle. Exactly like Radial_Intensity_Profiles.csv, this means the
+    file can later be found again using only Category + Batch_ID +
+    Region_ID (= the folder it's in) + Vesicle id (= in the filename) —
+    the same 4 keys used everywhere else in this pipeline to identify one
+    vesicle.
+
+    Parameters
+    ----------
+    vesicle_id      : int   — this vesicle's ID number
+    image_box       : array, shape (H, W, n_channels) — the already-cropped
+                       per-vesicle image (same one used in the
+                       Int_prof_Radial/Angular figures)
+    channels        : list of (channel_index, channel_name, cmap_name)
+                       tuples, e.g. [(0, "Membrane", "gray"),
+                                     (1, "Actin", "cmap_cyan")]
+    path_to_output  : str — per-region output folder (same as everywhere else)
+    pixel_size      : float — micrometres per pixel, for the scale bar
+
+    Returns
+    -------
+    None — files are written directly to `path_to_output`.
+    """
+    os.makedirs(path_to_output, exist_ok=True)
+
+    for channel_index, channel_name, cmap_name in channels:
+        fig, ax = plt.subplots(figsize=(3, 3), dpi=150)
+        ax.imshow(image_box[:, :, channel_index], cmap=cmap_name)
+        ax.set_axis_off()
+        # show_label=False: bar only, no "5 µm" text — these crops are
+        # small and meant to sit in a dense grid later, where a text
+        # label on every single panel would be visual clutter.
+        add_scale_bar(ax, pixel_size, length_um=5, color='white', show_label=False)
+
+        crop_path = os.path.join(
+            path_to_output, f"Vesicle_{vesicle_id}_{channel_name}_Crop.png")
+        fig.savefig(crop_path, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
 
 
 # =============================================================================
@@ -1061,15 +1305,31 @@ def plot_debug_overlay(ves_coordinates, radius, index_border_in,
 # INTENSITY PROFILE PLOTS
 # =============================================================================
 
-def plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_sizes,
+def plot_intensity_profiles(plot_int_profiles, save_crops, proteins_present, parameters_sizes,
                              channels_data, ves_coordinates, image_dim,
                              along_radius, theta, radial_profiles, angular_profiles,
                              index_border_in, index_border_out, background,
                              localization, path_to_output, exp_info, pixel_size):
     """
-    Dispatches to the correct per-protein-combination plotting function.
+    Does two SEPARATE things for this vesicle, each controlled by its own
+    on/off switch:
+
+      1. `plot_int_profiles` -> the big multi-panel diagnostic figure
+         (curve + channel thumbnails + background/localization numbers),
+         dispatched to whichever plot_int_prof_* function matches this
+         run's protein combination. Unchanged from before.
+
+      2. `save_crops` -> standalone, CLEAN membrane/actin crop images
+         (just the image + a scale bar, nothing else), saved regardless
+         of whether (1) is also happening. These are what
+         analysis_batch.select_representative_vesicles() +
+         plotting.plot_representative_channel_images() read back later
+         to build the cross-condition/phenotype comparison grid.
+
+    Both need the same `image_box` (the zoomed-in crop of this vesicle),
+    so it's built once up front and shared.
     """
-    if not plot_int_profiles:
+    if not plot_int_profiles and not save_crops:
         return
 
     num_channels = channels_data.shape[2]
@@ -1081,28 +1341,51 @@ def plot_intensity_profiles(plot_int_profiles, proteins_present, parameters_size
             channels_data[:, :, i], parameters_sizes[1],
             image_dim, ves_coordinates)
 
+    vesicle_id = int(ves_coordinates[0])
+
+    # ------------------------------------------------------------------
+    # Standalone channel crops — independent of plot_int_profiles.
+    # Membrane (channel 0) is always present; actin (the LAST channel,
+    # same convention used in format_radial_profile_rows) only exists
+    # if this run actually has an actin channel.
+    # ------------------------------------------------------------------
+    if save_crops:
+        crop_channels = [(0, "Membrane", "gray")]
+        if proteins_present[1]:
+            crop_channels.append((num_channels - 1, "Actin", "cmap_cyan"))
+        save_channel_crops(vesicle_id, image_box, crop_channels, path_to_output, pixel_size)
+
+    if not plot_int_profiles:
+        return
+
     protein_status = plot_format(proteins_present)
 
     if protein_status == "both_proteins":
         plot_int_prof_both(
-            int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2],
+            vesicle_id, ves_coordinates[3], parameters_sizes[2],
             along_radius, theta, radial_profiles, angular_profiles,
             index_border_in, index_border_out, image_box, background,
             localization, path_to_output, exp_info, pixel_size)
 
     elif protein_status == "only_septin":
         plot_int_prof_only_septin(
-            int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2],
+            vesicle_id, ves_coordinates[3], parameters_sizes[2],
             along_radius, theta, radial_profiles, angular_profiles,
             index_border_in, index_border_out, image_box, background,
             localization, path_to_output, exp_info, pixel_size)
 
     elif protein_status == "only_actin":
         plot_int_prof_only_actin(
-            int(ves_coordinates[0]), ves_coordinates[3], parameters_sizes[2],
+            vesicle_id, ves_coordinates[3], parameters_sizes[2],
             along_radius, theta, radial_profiles, angular_profiles,
             index_border_in, index_border_out, image_box, background,
             localization, path_to_output, exp_info, pixel_size)
+
+    # NOTE: protein_status == "unknown" (no septin AND no actin, e.g. the
+    # Empty condition) has no multi-panel diagnostic plot defined — there's
+    # no actin/septin curve to draw. The membrane channel crop saved above
+    # (under `save_crops`) already covers what's needed for Empty-condition
+    # representative images.
 
 
 def plot_int_prof_both(vesicle_id, radius, size_central_area, along_radius,
@@ -1212,13 +1495,24 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
                               index_border_in, index_border_out, image_box,
                               background, localization, path_to_output, exp_info,
                               pixel_size):
-    """Saves radial and angular intensity profile plots (Actin only)."""
+    """Saves radial and angular intensity profile plots (Actin only).
+
+    COLOUR SCHEME (per Nikki's request):
+      - Membrane channel: drawn in BLACK, shown with a WHITE-based image
+        (matplotlib's built-in 'gray' colormap: black background, white
+        signal — i.e. a normal grayscale image).
+      - Actin channel: drawn in CYAN, shown with a CYAN-based image
+        ('cmap_cyan', already registered by color_maps(): black
+        background, cyan signal).
+      Both channel images (panels B and C) get a 5 um scale bar in the
+      bottom-right corner.
+    """
     radius_um = along_radius * pixel_size
 
     fig, axes = plt.subplot_mosaic("AB;AC;AD", width_ratios=[3, 1], dpi=125)
     axes["A"].set_title(f'Intensity radial profile of Vesicle {vesicle_id}')
-    axes["A"].plot(radius_um, radial_profiles[:, 0], c='cyan', label='membrane')
-    axes["A"].plot(radius_um, radial_profiles[:, 1], c='gold', label='actin')
+    axes["A"].plot(radius_um, radial_profiles[:, 0], c='black', label='membrane')
+    axes["A"].plot(radius_um, radial_profiles[:, 1], c='cyan',  label='actin')
 
     actin_prof = radial_profiles[:, 1]
     peaks, _   = find_peaks(actin_prof, height=np.max(actin_prof) * 0.5)
@@ -1237,8 +1531,10 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
     axes["A"].set_ylabel('I (a.u.)')
     axes["A"].legend(loc="upper left", fontsize=8)
 
-    axes["B"].imshow(image_box[:, :, 0], cmap="cmap_cyan");   axes["B"].set_axis_off()
-    axes["C"].imshow(image_box[:, :, 1], cmap="cmap_yellow"); axes["C"].set_axis_off()
+    axes["B"].imshow(image_box[:, :, 0], cmap="gray");      axes["B"].set_axis_off()
+    add_scale_bar(axes["B"], pixel_size, length_um=5, color='white')
+    axes["C"].imshow(image_box[:, :, 1], cmap="cmap_cyan"); axes["C"].set_axis_off()
+    add_scale_bar(axes["C"], pixel_size, length_um=5, color='white')
     axes["D"].text(-0.2, 0.7, f"Background M:  {round(background[0,0],4)}", size=10)
     axes["D"].text(-0.2, 0.0, f"Localization A: {round(localization[0],3)}", size=10)
     axes["D"].set_axis_off()
@@ -1248,13 +1544,15 @@ def plot_int_prof_only_actin(vesicle_id, radius, size_central_area, along_radius
 
     fig2, axes2 = plt.subplot_mosaic("AB;AC", width_ratios=[3, 1], dpi=125)
     axes2["A"].set_title(f'Intensity angular profile of Vesicle {vesicle_id}')
-    axes2["A"].plot(theta * 180 / np.pi, angular_profiles[:, 0], c='cyan', label='membrane')
-    axes2["A"].plot(theta * 180 / np.pi, angular_profiles[:, 1], c='gold', label='actin')
+    axes2["A"].plot(theta * 180 / np.pi, angular_profiles[:, 0], c='black', label='membrane')
+    axes2["A"].plot(theta * 180 / np.pi, angular_profiles[:, 1], c='cyan',  label='actin')
     axes2["A"].legend(loc="upper left")
     axes2["A"].set(xlabel='θ (deg)', ylabel='I (a.u.)')
 
-    axes2["B"].imshow(image_box[:, :, 0], cmap="cmap_cyan");   axes2["B"].set_axis_off()
-    axes2["C"].imshow(image_box[:, :, 1], cmap="cmap_yellow"); axes2["C"].set_axis_off()
+    axes2["B"].imshow(image_box[:, :, 0], cmap="gray");      axes2["B"].set_axis_off()
+    add_scale_bar(axes2["B"], pixel_size, length_um=5, color='white')
+    axes2["C"].imshow(image_box[:, :, 1], cmap="cmap_cyan"); axes2["C"].set_axis_off()
+    add_scale_bar(axes2["C"], pixel_size, length_um=5, color='white')
 
     fig2.savefig(os.path.join(path_to_output, f"Vesicle_{vesicle_id}-Int_prof_Angular.png"))
     plt.close('all')
@@ -1339,12 +1637,32 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
                             parameters_profiles, proteins_present, size_mask,
                             final_output_path, exp_info, parameters_sizes,
                             plot_int_profiles, plot_mask, pixel_size,
-                            analysis_config):
+                            analysis_config, save_crops=True):
     """
     Runs the complete analysis pipeline for one vesicle.
 
-    Designed for parallel execution with joblib — returns a result row
-    and refined radius instead of writing to disk directly.
+    Designed for parallel execution with joblib — returns a result row,
+    a refined radius, and a list of radial-profile CSV rows instead of
+    writing anything to disk directly.
+
+    Returns
+    -------
+    row                 : list  — one Analysis_Results.csv row for this vesicle
+    refined_radius_um   : float or None — this vesicle's refined radius
+    radial_profile_rows : list of lists, or None — one row per radius point
+                          for Radial_Intensity_Profiles.csv (None only for
+                          the very first "margins" exit, before any radial
+                          profile has been computed at all)
+
+    Parameters
+    ----------
+    save_crops : bool, default True — if True, also saves standalone
+                 membrane/actin crop PNGs (with a scale bar, no text) for
+                 this vesicle, used later by
+                 analysis_batch.select_representative_vesicles() to build
+                 the cross-condition/phenotype representative image grid.
+                 Defaults to True so existing callers that don't pass it
+                 keep getting crops; pass save_crops=False to skip them.
 
     CHANGES FROM PREVIOUS VERSION:
     --------------------------------
@@ -1407,7 +1725,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
             exp_info, ves_coordinates, background, localization_val,
             lumen_val, None, None, None, None, 0, comment,
             shape_deform_dict=None, shape_sector_data=None)
-        return row, None
+        return row, None, None
 
     # ------------------------------------------------------------------
     # STEP 3 — Background correction
@@ -1431,6 +1749,17 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
 
     radial_profiles = radial_profiles[pixels_to_remove:, :]
     along_radius    = along_radius[pixels_to_remove:]
+
+    # ------------------------------------------------------------------
+    # Build the per-vesicle radial-profile CSV rows now, while the
+    # finished radial_profiles/along_radius arrays are at hand. They are
+    # not modified again anywhere below, so we compute the rows ONCE
+    # here and re-use the same `radial_profile_rows` list at every
+    # `return` statement further down this function.
+    # ------------------------------------------------------------------
+    radial_profile_rows = format_radial_profile_rows(
+        int(ves_coordinates[0]), along_radius, radial_profiles,
+        pixel_size, proteins_present)
 
     # ------------------------------------------------------------------
     # STEP 5 — Membrane detection
@@ -1506,7 +1835,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
             lumen_val, None, None, None, None, refined_radius_um, comment_final,
             shape_deform_dict=deform_score, shape_sector_data=sector_data)
         plt.close('all')
-        return row, refined_radius_um
+        return row, refined_radius_um, radial_profile_rows
 
     # ------------------------------------------------------------------
     # GATE 3 — No membrane peak found
@@ -1522,7 +1851,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
             lumen_val, None, None, None, None, refined_radius_um, comment_final,
             shape_deform_dict=deform_score, shape_sector_data=sector_data)
         plt.close('all')
-        return row, refined_radius_um
+        return row, refined_radius_um, radial_profile_rows
 
     # ------------------------------------------------------------------
     # STEP 7 — Low-signal check
@@ -1552,7 +1881,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
             None, None, None, None, refined_radius_um, comment_final,
             shape_deform_dict=deform_score, shape_sector_data=sector_data)
         plt.close('all')
-        return row, refined_radius_um
+        return row, refined_radius_um, radial_profile_rows
 
     # ------------------------------------------------------------------
     # STEP 9 — Protein localization
@@ -1584,7 +1913,7 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
         comment += comment_loc
 
     plot_intensity_profiles(
-        plot_int_profiles, proteins_present, parameters_sizes,
+        plot_int_profiles, save_crops, proteins_present, parameters_sizes,
         channels_data, ves_coordinates, image_dim,
         along_radius, theta, radial_profiles, angular_profiles,
         index_border_in, index_border_out,
@@ -1602,4 +1931,4 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
         shape_deform_dict=deform_score,
         shape_sector_data=sector_data)
 
-    return row, refined_radius_um
+    return row, refined_radius_um, radial_profile_rows

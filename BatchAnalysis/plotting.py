@@ -81,6 +81,17 @@ CONDITION_PALETTE = {
     "LinearCortex":   "#1a243d",   
 }
 
+# Used by plot_representative_radial_profiles(): when several conditions are
+# overlaid in ONE panel, color is reserved for Phenotype (so the cortex-
+# density gradient reads consistently with every other figure), and
+# linestyle is what tells BranchedCortex apart from LinearCortex instead.
+CONDITION_LINESTYLE = {
+    "Empty":          ":",
+    "Factin":         "-.",
+    "BranchedCortex": "-",
+    "LinearCortex":   "--",
+}
+
 # The single shared "settings sheet" for every figure.
 PLOT_STYLE = {
     "font_family":          "Arial",
@@ -2165,6 +2176,241 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
     if _as_figure:
         return fig
     _save_fig(fig, output_dir, "Batch_Actin_Metrics_CortexOnly")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. REPRESENTATIVE RADIAL PROFILE COMPARISON
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Draws the Lumenal / Sparse / Continuous representative actin radial-profile
+# comparison for BranchedCortex vs LinearCortex. The data behind this figure
+# comes from analysis_batch.compute_representative_radial_profiles(), which
+# already did the hard work of normalising and averaging the profiles — this
+# function's only job is to draw what it's handed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Fixed draw order (also the legend order) for the three phenotype curves.
+# Kept here, next to PHENOTYPE_PALETTE, since it's a plotting-only concern —
+# analysis_batch.py has its own copy of this list for the merge/averaging
+# step, but the two lists don't need to be the same object, just the same
+# spelling (PHENOTYPE_PALETTE keys are the single source of truth for that).
+_REPRESENTATIVE_PHENOTYPE_ORDER = ['Lumenal', 'Sparse', 'Continuous']
+
+
+def plot_representative_radial_profiles(rep_df, output_dir, _as_figure=False):
+    """
+    Draws the representative radial actin-intensity profile for Lumenal,
+    Sparse, and Continuous GUVs, with BranchedCortex and LinearCortex
+    overlaid in ONE shared panel — so the architectural difference between
+    the two nucleators is visible directly, peak against peak.
+
+    HOW TO TELL THE 6 LINES APART:
+    With two conditions x three phenotypes, this panel has 6 curves. Two
+    visual channels are used so they stay readable instead of becoming
+    "spaghetti":
+        COLOUR     -> Phenotype   (Lumenal / Sparse / Continuous), using
+                      the same PHENOTYPE_PALETTE as every other figure in
+                      this pipeline — so "dark navy" always means
+                      Continuous, everywhere.
+        LINE STYLE -> Condition   (solid = BranchedCortex, dashed =
+                      LinearCortex), via CONDITION_LINESTYLE.
+    This is the same trick as a 2-variable key on a map: shape tells you
+    one thing, colour tells you another, and together they're unambiguous.
+
+    Each curve is the MEDIAN of every cortex-forming-phenotype-matched
+    vesicle's interpolated actin profile at that x-position (normalized
+    radius = radius_um / that vesicle's own refined radius, so x=1.0 always
+    means "at this vesicle's own membrane" regardless of absolute size).
+
+    NOTE ON SPREAD: with 6 overlapping curves in one panel, a shaded
+    inter-quartile band for every single one becomes visually noisy fast,
+    so this version draws medians only (the underlying Q1/Q3 columns are
+    still saved in Representative_Radial_Profiles.csv if you want to add
+    a band back in for a specific comparison later).
+
+    Parameters
+    ----------
+    rep_df     : pandas DataFrame — output of
+                 analysis_batch.compute_representative_radial_profiles(),
+                 with columns Condition, Phenotype, N_vesicles,
+                 Normalized_Radius, Median_Actin, Q1_Actin, Q3_Actin
+                 (Median_Membrane/Q1/Q3 are also present but not drawn here).
+    output_dir : str — folder to save the figure into
+    """
+    set_paper_style()
+
+    conditions = [c for c in CONDITION_ORDER if c in rep_df['Condition'].unique()]
+    if not conditions:
+        return
+
+    fig_width, fig_height = _get_figsize_single_col()
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    # A faint vertical reference line at x=1.0: by construction, every
+    # vesicle's OWN membrane sits at normalized radius = 1.0, so this line
+    # marks "the membrane" the same way for every curve, regardless of any
+    # individual vesicle's (or condition's) absolute size.
+    ax.axvline(1.0, color='#999999', linestyle=':', linewidth=1.0, zorder=1)
+
+    for condition in conditions:
+        cond_df    = rep_df[rep_df['Condition'] == condition]
+        linestyle  = CONDITION_LINESTYLE.get(condition, '-')
+        cond_label = CONDITION_LABELS.get(condition, condition)
+
+        for phenotype in _REPRESENTATIVE_PHENOTYPE_ORDER:
+            curve = cond_df[cond_df['Phenotype'] == phenotype].sort_values('Normalized_Radius')
+            if curve.empty:
+                continue
+
+            color = PHENOTYPE_PALETTE.get(phenotype, '#aaaaaa')
+            n     = int(curve['N_vesicles'].iloc[0])
+
+            ax.plot(
+                curve['Normalized_Radius'], curve['Median_Actin'],
+                color=color, linestyle=linestyle, linewidth=2.0,
+                label=f"{cond_label} \u2013 {phenotype} (N={n})", zorder=3)
+
+    ax.set_xlabel("Normalized radius (r / R)", fontsize=_fs("label"))
+    ax.set_ylabel("Actin intensity (a.u.)", fontsize=_fs("label"))
+    ax.tick_params(labelsize=_fs("tick"))
+
+    # Two columns keep a 6-entry legend compact instead of one tall list.
+    ax.legend(loc='upper left', ncol=2, fontsize=_fs("legend") * 0.8, frameon=False)
+    sns.despine(ax=ax)
+
+    plt.tight_layout()
+
+    if _as_figure:
+        return fig
+    _save_fig(fig, output_dir, "Plot_Representative_Radial_Profiles")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. REPRESENTATIVE CHANNEL IMAGE GRID
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Composes the per-vesicle membrane/actin "crop" images (saved by
+# skeleton.save_channel_crops via main.py) into one grid: one row per
+# (Condition, Phenotype) combination, one column per channel. The actual
+# vesicle selected for each row comes from
+# analysis_batch.select_representative_vesicles().
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Preferred row order within a condition. Whichever of these a condition
+# actually has gets shown, in this order; anything else falls back to
+# alphabetical so a new/renamed phenotype doesn't just vanish silently.
+_REPRESENTATIVE_IMAGE_PHENOTYPE_ORDER = [
+    'Empty', 'Lumenal', 'Shell', 'Sparse', 'Patchy', 'Continuous'
+]
+
+
+def plot_representative_channel_images(rep_vesicles_df, root_path, output_dir, _as_figure=False):
+    """
+    Builds one grid figure of representative membrane/actin crop images —
+    one row per (Condition, Phenotype) combination that exists in the data,
+    two columns (Membrane, Actin).
+
+    WHERE THE IMAGES COME FROM: this function does NOT touch the original
+    microscopy files. It re-loads the small, already-cropped PNGs that
+    skeleton.save_channel_crops() saved during the per-vesicle pipeline run
+    (one pair per vesicle, living right next to that vesicle's
+    Analysis_Results.csv row). The path to each image is rebuilt the same
+    way file_handling.py rebuilds Batch_ID/Region_ID:
+
+        root_path / Batch_ID / Region_ID / "Vesicle_<id>_Membrane_Crop.png"
+        root_path / Batch_ID / Region_ID / "Vesicle_<id>_Actin_Crop.png"
+
+    If a particular image file can't be found (e.g. main.py was run with
+    an older version of skeleton.py, before save_channel_crops existed),
+    that panel is left blank with an "image not found" note instead of
+    crashing the whole figure.
+
+    Parameters
+    ----------
+    rep_vesicles_df : pandas DataFrame — output of
+                       analysis_batch.select_representative_vesicles(), with
+                       columns Category, Phenotype_Category, Batch_ID,
+                       Region_ID, Vesicle id, N_in_group, Selection_Metric.
+    root_path       : str — the same ROOT_PATH used everywhere else (the
+                       top-level Output folder that contains every batch).
+    output_dir      : str — folder to save the figure into.
+    """
+    if rep_vesicles_df is None or rep_vesicles_df.empty:
+        return
+
+    set_paper_style()
+
+    conditions = [c for c in CONDITION_ORDER if c in rep_vesicles_df['Category'].unique()]
+
+    # Build the ordered list of rows to draw: (condition, phenotype,
+    # membrane_path_or_None, actin_path_or_None, n_in_group).
+    rows_to_draw = []
+    for condition in conditions:
+        cond_rows = rep_vesicles_df[rep_vesicles_df['Category'] == condition]
+
+        present = list(cond_rows['Phenotype_Category'].unique())
+        ordered = [p for p in _REPRESENTATIVE_IMAGE_PHENOTYPE_ORDER if p in present]
+        ordered += sorted(p for p in present if p not in ordered)
+
+        for phenotype in ordered:
+            r = cond_rows[cond_rows['Phenotype_Category'] == phenotype].iloc[0]
+            vid    = int(r['Vesicle id'])
+            folder = os.path.join(root_path, str(r['Batch_ID']), str(r['Region_ID']))
+
+            membrane_path = os.path.join(folder, f"Vesicle_{vid}_Membrane_Crop.png")
+            actin_path    = os.path.join(folder, f"Vesicle_{vid}_Actin_Crop.png")
+
+            rows_to_draw.append((
+                condition, phenotype,
+                membrane_path if os.path.exists(membrane_path) else None,
+                actin_path if os.path.exists(actin_path) else None,
+                int(r['N_in_group']),
+            ))
+
+    if not rows_to_draw:
+        return
+
+    nrows = len(rows_to_draw)
+    row_height_in = 1.3
+    fig_width_in  = 3.4
+    fig, axes = plt.subplots(
+        nrows, 2, figsize=(fig_width_in, row_height_in * nrows), squeeze=False)
+
+    label_fontsize = _fs_for_width("label", fig_width_in)
+    title_fontsize = _fs_for_width("title", fig_width_in)
+    annot_fontsize = _fs_for_width("annot", fig_width_in)
+
+    for row_idx, (condition, phenotype, mpath, apath, n) in enumerate(rows_to_draw):
+        ax_m, ax_a = axes[row_idx, 0], axes[row_idx, 1]
+
+        for ax, path in [(ax_m, mpath), (ax_a, apath)]:
+            if path is not None:
+                ax.imshow(plt.imread(path))
+            else:
+                ax.text(0.5, 0.5, "image\nnot found", ha='center', va='center',
+                        fontsize=annot_fontsize, color='#999999')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+        # Row label (condition + phenotype + N) drawn as free text to the
+        # left of the membrane panel — using ax.text instead of
+        # set_ylabel(), because turning the axis ticks/spines off above
+        # would otherwise hide a real ylabel too.
+        row_label = f"{CONDITION_LABELS.get(condition, condition)}\n{phenotype} (N={n})"
+        ax_m.text(-0.12, 0.5, row_label, transform=ax_m.transAxes,
+                  ha='right', va='center', fontsize=label_fontsize)
+
+        if row_idx == 0:
+            ax_m.set_title("Membrane", fontsize=title_fontsize, fontweight='bold')
+            ax_a.set_title("Actin", fontsize=title_fontsize, fontweight='bold')
+
+    plt.tight_layout()
+
+    if _as_figure:
+        return fig
+    _save_fig(fig, output_dir, "Representative_Channel_Images")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

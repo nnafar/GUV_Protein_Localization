@@ -24,6 +24,94 @@ import pandas as pd
 import numpy as np
 
 
+def _scan_and_tag_csv_files(root_path, categories, filename, required_column):
+    """
+    Walks every sub-folder under `root_path`, finds every file named
+    `filename`, loads it, and tags each row with which experiment it came
+    from (Category / Batch_ID / Region_ID) based on the FOLDER NAME.
+
+    THE ANALOGY: this is like going through a filing cabinet, opening
+    every drawer, and for every paper of the right type, stapling a sticky
+    note to it that says which drawer (folder) it came from — before
+    putting all the papers into one big combined pile.
+
+    This is the shared "folder walking + tagging" logic originally used
+    only for Analysis_Results.csv. It is now factored out into its own
+    function so that BOTH Analysis_Results.csv (one row per vesicle) and
+    Radial_Intensity_Profiles.csv (one row per radius point per vesicle)
+    get tagged the exact same way — which is essential, since that's
+    what lets us join the two files together later using
+    Category + Batch_ID + Region_ID + Vesicle id.
+
+    Parameters
+    ----------
+    root_path        : str  — path to the top-level Output folder
+    categories       : list — condition names to look for in folder names
+    filename          : str  — exact filename to look for in each folder,
+                        e.g. "Analysis_Results.csv" or
+                        "Radial_Intensity_Profiles.csv"
+    required_column   : str  — a column name that MUST be present for a
+                        loaded file to be kept (used as a quick sanity
+                        check that the file isn't empty/corrupted)
+
+    Returns
+    -------
+    list of pandas DataFrames (NOT yet concatenated), each one already
+    tagged with 'Category', 'Batch_ID', 'Region_ID'. Returns an empty
+    list if nothing was found.
+    """
+    all_dfs = []
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+
+        if filename not in filenames:
+            continue  # Skip folders that don't have this particular file
+
+        file_path = os.path.join(dirpath, filename)
+
+        # ---- Determine the experiment folder name ----
+        # Example dirpath: .../Output/260208_BranchedCortex_1/Region0000
+        experiment_folder = os.path.basename(os.path.dirname(dirpath))
+
+        # ---- Determine which condition this folder belongs to ----
+        assigned_category = 'Other'
+        for cat in categories:
+            if cat.lower() in experiment_folder.lower():
+                assigned_category = cat
+                break
+
+        # ---- Load the CSV file ----
+        df = None
+        try:
+            df = pd.read_csv(file_path, quotechar='"', skipinitialspace=True)
+        except Exception:
+            try:
+                df = pd.read_csv(
+                    file_path,
+                    quotechar='"',
+                    skipinitialspace=True,
+                    on_bad_lines='skip',
+                    engine='python'
+                )
+                print(f"  ⚠ Loaded with skipped rows: {file_path}")
+            except Exception as e:
+                print(f"  ✗ Could not read: {file_path}  ({e})")
+                continue
+
+        if df is None or required_column not in df.columns:
+            print(f"  ✗ Skipped (missing '{required_column}' column): {file_path}")
+            continue
+
+        # ---- Tag each row with its origin ----
+        df['Category']  = assigned_category
+        df['Batch_ID']  = experiment_folder
+        df['Region_ID'] = os.path.basename(dirpath)
+
+        all_dfs.append(df)
+
+    return all_dfs
+
+
 def load_and_process_data(root_path, categories):
     """
     Scans the root folder, finds every Analysis_Results.csv, loads them,
@@ -43,71 +131,16 @@ def load_and_process_data(root_path, categories):
     -------
     master_df : pandas DataFrame, or None if no files were found
     """
-    all_dfs = []
     print(f"Scanning directory: {root_path}\n")
 
-    # os.walk steps through every sub-folder inside root_path.
-    # For each folder it gives us:
-    #   dirpath   = full path of the current folder
-    #   dirnames  = names of sub-folders inside it (we don't need this)
-    #   filenames = names of files inside it
-    for dirpath, dirnames, filenames in os.walk(root_path):
+    all_dfs = _scan_and_tag_csv_files(
+        root_path, categories, "Analysis_Results.csv", required_column="Date")
 
-        if "Analysis_Results.csv" not in filenames:
-            continue  # Skip folders that don't have a results file
-
-        file_path = os.path.join(dirpath, "Analysis_Results.csv")
-
-        # ---- Determine the experiment folder name ----
-        # Example dirpath: .../Output/260208_BranchedCortex_1/Region0000
-        # os.path.dirname removes the last component → .../Output/260208_BranchedCortex_1
-        # os.path.basename takes only the last component → 260208_BranchedCortex_1
-        experiment_folder = os.path.basename(os.path.dirname(dirpath))
-
-        # ---- Determine which condition this folder belongs to ----
-        # We check whether any of our condition names appears inside the folder name.
-        # str.lower() makes the comparison case-insensitive.
-        assigned_category = 'Other'  # default if nothing matches
-        for cat in categories:
-            if cat.lower() in experiment_folder.lower():
-                assigned_category = cat
-                break  # stop once we find a match
-
-        # ---- Load the CSV file ----
-        # We try the standard way first, then a fallback if the file is malformed.
-        df = None
-
-        try:
-            df = pd.read_csv(file_path, quotechar='"', skipinitialspace=True)
-
-        except Exception:
-            try:
-                df = pd.read_csv(
-                    file_path,
-                    quotechar='"',
-                    skipinitialspace=True,
-                    on_bad_lines='skip',   # skip rows that can't be parsed
-                    engine='python'
-                )
-                print(f"  ⚠ Loaded with skipped rows: {file_path}")
-            except Exception as e:
-                print(f"  ✗ Could not read: {file_path}  ({e})")
-                continue  # skip this file entirely
-
-        # Check that the file has the columns we expect
-        if df is None or 'Date' not in df.columns:
-            print(f"  ✗ Skipped (missing 'Date' column): {file_path}")
-            continue
-
-        # ---- Tag each row with its origin ----
-        # This lets you trace any row back to its experiment and region later.
-        df['Category'] = assigned_category
-        df['Batch_ID'] = experiment_folder           # e.g. '260208_BranchedCortex_1'
-        df['Region_ID'] = os.path.basename(dirpath)  # e.g. 'Region0000'
-
-        all_dfs.append(df)
-        print(f"  ✓ Loaded [{assigned_category:>15}]  {experiment_folder} / {os.path.basename(dirpath)}"
-              f"  ({len(df)} rows)")
+    for df in all_dfs:
+        cat   = df['Category'].iloc[0]
+        batch = df['Batch_ID'].iloc[0]
+        region = df['Region_ID'].iloc[0]
+        print(f"  ✓ Loaded [{cat:>15}]  {batch} / {region}  ({len(df)} rows)")
 
     # ---- Nothing found ----
     if not all_dfs:
@@ -180,6 +213,63 @@ def load_and_process_data(root_path, categories):
         print(f"      {cat:>15} : {count} vesicles")
 
     return master_df
+
+
+def load_radial_profiles(root_path, categories):
+    """
+    Scans the root folder, finds every Radial_Intensity_Profiles.csv
+    (one per region, written by skeleton.create_radial_profile_csv via
+    main.py), loads them, tags each row with Category/Batch_ID/Region_ID,
+    and returns one big combined long-format table.
+
+    THE ANALOGY: load_and_process_data() above collects every vesicle's
+    "report card" (one row per vesicle). This function instead collects
+    every vesicle's full "growth chart" (one row per radius measurement
+    point) — there will be far more rows here than in the master dataset.
+
+    The returned table has columns:
+        Vesicle id, radius_um, Membrane_Intensity, Actin_Intensity,
+        Category, Batch_ID, Region_ID
+
+    To connect a row in THIS table back to that same vesicle's phenotype
+    (Lumenal / Sparse / Continuous / ...), merge it with the master
+    dataset on ['Category', 'Batch_ID', 'Region_ID', 'Vesicle id'] — see
+    analysis_batch.compute_representative_radial_profiles for an example.
+
+    Parameters
+    ----------
+    root_path  : str  — same top-level Output folder used in
+                 load_and_process_data
+    categories : list — condition names, e.g.
+                 ['BranchedCortex', 'LinearCortex', 'Factin', 'Empty']
+
+    Returns
+    -------
+    radial_df : pandas DataFrame, or None if no files were found
+    """
+    print(f"\nScanning directory for radial profiles: {root_path}\n")
+
+    all_dfs = _scan_and_tag_csv_files(
+        root_path, categories, "Radial_Intensity_Profiles.csv",
+        required_column="Vesicle id")
+
+    if not all_dfs:
+        print("  No Radial_Intensity_Profiles.csv files found.\n"
+              "  (Did you re-run main.py with the updated skeleton.py?)")
+        return None
+
+    radial_df = pd.concat(all_dfs, ignore_index=True)
+
+    # Make sure the numeric columns are actually numeric (same defensive
+    # pattern as load_and_process_data above — a CSV value can sometimes
+    # get read in as text).
+    for col in ['Vesicle id', 'radius_um', 'Membrane_Intensity', 'Actin_Intensity']:
+        radial_df[col] = pd.to_numeric(radial_df[col], errors='coerce')
+
+    print(f"  ✓ Loaded {len(radial_df)} radial-profile points "
+          f"across {radial_df['Batch_ID'].nunique()} batches")
+
+    return radial_df
 
 
 def create_output_folder(root_path, folder_name):

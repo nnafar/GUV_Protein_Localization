@@ -55,6 +55,38 @@ MIN_N_FOR_SKEW = 8
 # summary table — both must stay in sync if phenotype labels ever change.
 NON_CORTEX_PHENOTYPES = {'Empty', 'Lumenal', 'Excluded'}
 
+# =============================================================================
+# REPRESENTATIVE RADIAL PROFILE COMPARISON (Lumenal / Sparse / Continuous)
+# =============================================================================
+
+# Only these two conditions actually have a Sparse/Continuous cortex
+# gradient worth comparing this way (Factin only has Shell/Lumenal — see
+# analysis_phenotype.py's _classify_factin).
+RADIAL_PROFILE_CONDITIONS = ['BranchedCortex', 'LinearCortex']
+
+# The three phenotypes whose representative actin profile we want to
+# compare directly. Order here is also the legend/plotting order.
+RADIAL_PROFILE_PHENOTYPES = ['Lumenal', 'Sparse', 'Continuous']
+
+# Each vesicle's radial profile is re-expressed as a FRACTION of that
+# vesicle's own refined radius (radius_um / refined_radius_um), so that
+# small and large vesicles can be averaged together with their membranes
+# aligned at the same x-position. We then resample every vesicle onto this
+# shared grid before averaging.
+#
+# *** Keep NORMALIZED_RADIUS_MAX in sync with 'length_excess' in main.py's
+#     ANALYSIS_CONFIG (radial profiles are only sampled out to
+#     length_excess times the vesicle radius, so asking for points beyond
+#     that would just be flat-line extrapolation). ***
+NORMALIZED_RADIUS_MAX    = 1.2
+NORMALIZED_RADIUS_POINTS = 200
+
+# Don't bother plotting a "representative" curve from fewer than this many
+# vesicles — the median of 1-2 noisy profiles isn't representative of
+# anything. (Sparse is the smallest cortex-forming grade in BranchedCortex,
+# so this guard matters most for that group.)
+MIN_N_FOR_REPRESENTATIVE_PROFILE = 3
+
 
 # =============================================================================
 # HELPER — DECIDE WHICH METRICS TO USE FOR A CONDITION
@@ -460,11 +492,316 @@ def _shorten_batch_label(batch_id, condition):
         return batch_id   # fall back to the full name if parsing fails
 
 
+def _interpolate_one_vesicle(normalized_radius, intensity, grid):
+    """
+    Resamples ONE vesicle's intensity curve onto the shared `grid` of
+    normalized radius values, using straight-line interpolation.
+
+    THE ANALOGY: imagine every vesicle's profile as a hand-drawn line on
+    its own sheet of graph paper, where the x-axis spacing is slightly
+    different on every sheet (because vesicles have different sizes).
+    Before you can average many sheets together, you first need to redraw
+    every line onto IDENTICAL graph paper. That's what np.interp does
+    here — it reads the original (slightly irregular) line and re-draws
+    it at exactly the x-positions given in `grid`.
+
+    Parameters
+    ----------
+    normalized_radius : array — this vesicle's own (radius_um / refined_radius_um)
+                         values; must be sorted ascending (it already is,
+                         since radius_um increases outward along the profile)
+    intensity          : array — the matching intensity values (membrane or actin)
+    grid               : array — the shared x-axis (normalized radius) every
+                         vesicle gets resampled onto
+
+    Returns
+    -------
+    array, same length as `grid` — the interpolated intensity curve.
+    Points in `grid` that fall outside this vesicle's own measured range
+    are filled with that vesicle's first/last measured value (np.interp's
+    default "clamp to the edges" behaviour) rather than wild extrapolation.
+    """
+    return np.interp(grid, normalized_radius, intensity)
+
+
+def compute_representative_radial_profiles(df, radial_df, output_dir):
+    """
+    Builds a "representative" radial actin-intensity curve for the
+    Lumenal / Sparse / Continuous phenotypes, separately for BranchedCortex
+    and LinearCortex — the data behind the comparison plot Nikki asked for.
+
+    THE BIG PICTURE / WHY THIS IS TRICKIER THAN A SIMPLE AVERAGE:
+    Every vesicle has its OWN radial profile, sampled at its OWN set of
+    radius values in micrometres (because vesicles vary in size, the
+    sampled radius range differs from one vesicle to the next). You can't
+    just average "intensity at radius_um = 4.0" across 30 vesicles of
+    different sizes — for a small vesicle, 4.0 µm might be near the
+    membrane, while for a large vesicle it might be deep in the lumen.
+
+    The fix is to first divide each vesicle's radius_um by ITS OWN refined
+    radius (from Analysis_Results.csv), turning "radius in µm" into
+    "fraction of this vesicle's radius" — e.g. 1.0 always means "right at
+    this vesicle's own membrane". THEN every vesicle's curve is resampled
+    (interpolated) onto one shared grid of these fractions, so they can
+    finally be stacked together and averaged point-by-point.
+
+    Parameters
+    ----------
+    df         : pandas DataFrame — master dataset, already passed through
+                 analysis_phenotype.run_phenotype_analysis() so that it has
+                 'Phenotype_Category' (and 'Refined Radius (um)').
+    radial_df  : pandas DataFrame, or None — output of
+                 file_handling.load_radial_profiles(). If None, this whole
+                 step is skipped (with an explanatory message) so the rest
+                 of the pipeline still runs.
+    output_dir : str — folder to save Representative_Radial_Profiles.csv into
+
+    Returns
+    -------
+    rep_df : pandas DataFrame in "tidy" long format, with one row per
+             (Condition, Phenotype, Normalized_Radius) grid point:
+                 Condition, Phenotype, N_vesicles, Normalized_Radius,
+                 Median_Actin, Q1_Actin, Q3_Actin,
+                 Median_Membrane, Q1_Membrane, Q3_Membrane
+             or None if radial_df was None or nothing could be matched.
+    """
+    print("\n--- Computing Representative Radial Profiles ---")
+
+    if radial_df is None:
+        print("  ! No radial profile data available "
+              "(file_handling.load_radial_profiles returned None). Skipping.")
+        return None
+
+    required_cols = {'Category', 'Batch_ID', 'Region_ID', 'Vesicle id',
+                      'Phenotype_Category', 'Refined Radius (um)'}
+    missing = required_cols - set(df.columns)
+    if missing:
+        print(f"  ! Master dataset is missing column(s) {missing}. "
+              "Make sure phenotype analysis has already run. Skipping.")
+        return None
+
+    # ── Step 1: join the radius-point-level data with each vesicle's
+    #            phenotype label and refined radius ──────────────────────
+    # We match rows on the SAME 4 columns that uniquely identify a vesicle
+    # everywhere else in this pipeline. 'Vesicle id' is cast to a plain
+    # int on both sides first, since one side may have come back from a
+    # CSV as a float (e.g. 3.0) and the other as an int (e.g. 3) — those
+    # would otherwise fail to match during the merge.
+    id_cols = ['Category', 'Batch_ID', 'Region_ID', 'Vesicle id']
+
+    left = radial_df.copy()
+    left['Vesicle id'] = pd.to_numeric(left['Vesicle id'], errors='coerce').round().astype('Int64')
+
+    right = df[id_cols + ['Phenotype_Category', 'Refined Radius (um)']].copy()
+    right['Vesicle id'] = pd.to_numeric(right['Vesicle id'], errors='coerce').round().astype('Int64')
+
+    merged = left.merge(right, on=id_cols, how='inner')
+
+    if merged.empty:
+        print("  ! Merge between radial profiles and the master dataset "
+              "produced 0 matching rows — check that both were generated "
+              "from the same Output folder. Skipping.")
+        return None
+
+    # ── Step 2: keep only rows we can actually normalise ──────────────────
+    merged = merged[merged['Refined Radius (um)'] > 0].copy()
+    merged['Normalized_Radius'] = merged['radius_um'] / merged['Refined Radius (um)']
+
+    # The shared x-axis grid every vesicle's curve gets resampled onto.
+    grid = np.linspace(0, NORMALIZED_RADIUS_MAX, NORMALIZED_RADIUS_POINTS)
+
+    rep_rows = []
+
+    for condition in RADIAL_PROFILE_CONDITIONS:
+        cond_df = merged[merged['Category'] == condition]
+
+        for phenotype in RADIAL_PROFILE_PHENOTYPES:
+            group = cond_df[cond_df['Phenotype_Category'] == phenotype]
+
+            # Each vesicle contributes ONE interpolated curve. group.groupby
+            # walks through the data vesicle-by-vesicle (grouped by the same
+            # 4 ID columns), so 'vesicle' below is one vesicle's full set
+            # of radius/intensity points, already sorted by radius_um.
+            actin_curves    = []
+            membrane_curves = []
+            for _, vesicle in group.groupby(id_cols):
+                vesicle = vesicle.sort_values('Normalized_Radius')
+                actin_curves.append(_interpolate_one_vesicle(
+                    vesicle['Normalized_Radius'].values,
+                    vesicle['Actin_Intensity'].values, grid))
+                membrane_curves.append(_interpolate_one_vesicle(
+                    vesicle['Normalized_Radius'].values,
+                    vesicle['Membrane_Intensity'].values, grid))
+
+            n_vesicles = len(actin_curves)
+            if n_vesicles < MIN_N_FOR_REPRESENTATIVE_PROFILE:
+                print(f"  -> Skipping {condition} / {phenotype}: "
+                      f"only {n_vesicles} vesicle(s) "
+                      f"(need >= {MIN_N_FOR_REPRESENTATIVE_PROFILE}).")
+                continue
+
+            # Stack every vesicle's curve into one 2D array
+            # (n_vesicles rows x NORMALIZED_RADIUS_POINTS columns), then
+            # take the median/IQR DOWN the rows (axis=0) — i.e. across
+            # vesicles, separately at every grid point.
+            actin_stack    = np.vstack(actin_curves)
+            membrane_stack = np.vstack(membrane_curves)
+
+            for i, x in enumerate(grid):
+                rep_rows.append({
+                    'Condition':         condition,
+                    'Phenotype':         phenotype,
+                    'N_vesicles':        n_vesicles,
+                    'Normalized_Radius': round(float(x), 4),
+                    'Median_Actin':      float(np.median(actin_stack[:, i])),
+                    'Q1_Actin':          float(np.percentile(actin_stack[:, i], 25)),
+                    'Q3_Actin':          float(np.percentile(actin_stack[:, i], 75)),
+                    'Median_Membrane':   float(np.median(membrane_stack[:, i])),
+                    'Q1_Membrane':       float(np.percentile(membrane_stack[:, i], 25)),
+                    'Q3_Membrane':       float(np.percentile(membrane_stack[:, i], 75)),
+                })
+
+            print(f"  -> {condition:>14} / {phenotype:<10}: "
+                  f"{n_vesicles} vesicles")
+
+    if not rep_rows:
+        print("  ! No phenotype group had enough vesicles to build a "
+              "representative profile. Skipping plot.")
+        return None
+
+    rep_df = pd.DataFrame(rep_rows)
+
+    # ── Save the underlying numbers, so every curve in the final figure
+    #    can be traced back to a CSV row (same "verify at source" workflow
+    #    used everywhere else in this pipeline) ───────────────────────────
+    rep_csv_path = os.path.join(output_dir, "Representative_Radial_Profiles.csv")
+    rep_df.to_csv(rep_csv_path, index=False)
+    print(f"  -> Saved: {rep_csv_path}")
+
+    # ── Draw the comparison figure ─────────────────────────────────────────
+    plotting.plot_representative_radial_profiles(rep_df, output_dir)
+
+    print("  -> Representative Radial Profile comparison complete.")
+    return rep_df
+
+
+# =============================================================================
+# REPRESENTATIVE CHANNEL IMAGES (Empty / Lumenal / Sparse / Patchy / Continuous)
+# =============================================================================
+
+# Real biological phenotype labels worth showing a picture of. 'Excluded'
+# is deliberately left out — it's a QC catch-all (too small, no membrane
+# detected, wide-peak artefact, ...) covering several unrelated failure
+# modes, not a single recognisable "look", so a single representative
+# image of it wouldn't mean much.
+REPRESENTATIVE_IMAGE_PHENOTYPES_TO_SKIP = {'Excluded'}
+
+# Tried in this order to pick "the" representative vesicle within a
+# (Condition, Phenotype) group: the first metric that's actually present
+# AND has more than one distinct value in this group (so we don't try to
+# rank vesicles by a column that's all zeros, e.g. localization for a
+# group that's all Empty). Falls back to "just the lowest Vesicle id" if
+# none of these work, so the function always returns a pick rather than
+# raising an error.
+_SELECTION_METRIC_PRIORITY = ['A localization', 'Gini_Index', 'Refined Radius (um)']
+
+
+def select_representative_vesicles(df, output_dir):
+    """
+    Picks ONE "typical" vesicle for every (Category, Phenotype_Category)
+    combination actually present in the data, and saves the picks to a CSV
+    so each one can be inspected/verified by hand later.
+
+    THE ANALOGY: imagine picking one photo to represent "what a B+ student
+    looks like" out of a whole class's photos — you wouldn't pick the best
+    or the worst, you'd pick whoever is closest to the B+ average. That's
+    exactly what this does: for each group, it ranks vesicles by whichever
+    metric defines that phenotype most directly (A localization first,
+    since that's literally the axis analysis_phenotype.py's classifiers
+    use), and picks the one closest to the GROUP'S OWN MEDIAN.
+
+    This function only SELECTS — it doesn't touch any image files. The
+    actual crop images are loaded later, by
+    plotting.plot_representative_channel_images(), using the Batch_ID /
+    Region_ID / Vesicle id columns saved here to rebuild each file's path.
+
+    Parameters
+    ----------
+    df         : pandas DataFrame — master dataset, already classified by
+                 analysis_phenotype.run_phenotype_analysis() (must have
+                 'Phenotype_Category').
+    output_dir : str — folder to save Representative_Vesicles.csv into
+
+    Returns
+    -------
+    rep_vesicles_df : pandas DataFrame with one row per (Category,
+                      Phenotype_Category) combination:
+                          Category, Phenotype_Category, Batch_ID,
+                          Region_ID, Vesicle id, N_in_group, Selection_Metric
+                      or None if 'Phenotype_Category' isn't in df.
+    """
+    print("\n--- Selecting Representative Vesicles (for channel images) ---")
+
+    if 'Phenotype_Category' not in df.columns:
+        print("  ! 'Phenotype_Category' not found — run phenotype analysis first. Skipping.")
+        return None
+
+    candidates = df[~df['Phenotype_Category'].isin(REPRESENTATIVE_IMAGE_PHENOTYPES_TO_SKIP)]
+
+    picks = []
+    for (condition, phenotype), group in candidates.groupby(['Category', 'Phenotype_Category']):
+
+        chosen_metric = None
+        for metric in _SELECTION_METRIC_PRIORITY:
+            if metric in group.columns:
+                values = group[metric].dropna()
+                if len(values) > 0 and values.nunique() > 1:
+                    chosen_metric = metric
+                    break
+
+        if chosen_metric is not None:
+            # The vesicle whose value sits closest to this group's own
+            # median for that metric — i.e. the most "typical" member.
+            median_val  = group[chosen_metric].median()
+            chosen_idx  = (group[chosen_metric] - median_val).abs().idxmin()
+        else:
+            # No usable metric (e.g. a single-vesicle group, or every
+            # value identical) — just take the lowest Vesicle id so the
+            # pick is at least deterministic and reproducible.
+            chosen_idx = group.sort_values('Vesicle id').index[0]
+
+        chosen = df.loc[chosen_idx]
+        picks.append({
+            'Category':            condition,
+            'Phenotype_Category':  phenotype,
+            'Batch_ID':            chosen['Batch_ID'],
+            'Region_ID':           chosen['Region_ID'],
+            'Vesicle id':          int(chosen['Vesicle id']),
+            'N_in_group':          len(group),
+            'Selection_Metric':    chosen_metric if chosen_metric else 'lowest_vesicle_id',
+        })
+        print(f"  -> {condition:>14} / {phenotype:<10}: "
+              f"Vesicle {int(chosen['Vesicle id'])} from {chosen['Batch_ID']} "
+              f"(N={len(group)}, picked by {chosen_metric or 'lowest_vesicle_id'})")
+
+    if not picks:
+        print("  ! No groups found to pick representatives from. Skipping.")
+        return None
+
+    rep_vesicles_df = pd.DataFrame(picks)
+
+    rep_path = os.path.join(output_dir, "Representative_Vesicles.csv")
+    rep_vesicles_df.to_csv(rep_path, index=False)
+    print(f"  -> Saved: {rep_path}")
+
+    return rep_vesicles_df
+
+
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
-def run_batch_analysis(df, output_dir):
+def run_batch_analysis(df, output_dir, radial_df=None, root_path=None):
     """
     Main function that runs ALL batch analyses in sequence.
 
@@ -476,11 +813,24 @@ def run_batch_analysis(df, output_dir):
       3. Compute per-batch cortex-forming fraction, save CSV
       4. Generate one per-condition batch variability plot
       5. Generate one overview plot showing all conditions
+      6. (NEW) Build the representative Lumenal/Sparse/Continuous radial
+         actin-profile comparison for BranchedCortex vs LinearCortex
+      7. (NEW) Pick + assemble representative membrane/actin channel
+         images for every Condition x Phenotype combination
 
     Parameters
     ----------
     df         : pandas DataFrame — the master dataset from file_handling.py
     output_dir : str              — the Batch_Analysis_Results folder path
+    radial_df  : pandas DataFrame, or None — output of
+                 file_handling.load_radial_profiles(). Optional so that
+                 existing calls to run_batch_analysis(df, output_dir)
+                 elsewhere keep working unchanged; pass it in to also get
+                 the representative radial profile comparison (Step 6).
+    root_path  : str, or None — the same ROOT_PATH used everywhere else
+                 (the top-level Output folder). Needed to find each
+                 representative vesicle's saved crop images on disk for
+                 Step 7; if None, Step 7 is skipped.
     """
     print("\n--- Running Batch-to-Batch Variability Analysis ---")
 
@@ -555,6 +905,37 @@ def run_batch_analysis(df, output_dir):
     else:
         print("  -> Skipping cortex-only batch actin plot "
               "('Phenotype_Category' not found — run phenotype analysis first).")
+
+    # ── Step 8: Representative radial profile comparison ─────────────────────
+    # Lumenal vs Sparse vs Continuous, BranchedCortex vs LinearCortex,
+    # built from the raw radial profiles (Radial_Intensity_Profiles.csv),
+    # not from the single-number summary metrics used in Steps 1-7.
+    # Requires 'Phenotype_Category' (same guard as Steps 5/7) AND radial_df.
+    if radial_df is None:
+        print("  -> Skipping representative radial profile comparison "
+              "(no radial_df passed in — see file_handling.load_radial_profiles).")
+    elif 'Phenotype_Category' not in df.columns:
+        print("  -> Skipping representative radial profile comparison "
+              "('Phenotype_Category' not found — run phenotype analysis first).")
+    else:
+        compute_representative_radial_profiles(df, radial_df, batch_output_dir)
+
+    # ── Step 9: Representative channel images ─────────────────────────────────
+    # One membrane/actin crop pair per (Condition, Phenotype) combination —
+    # e.g. "what does a typical Continuous BranchedCortex GUV's actin
+    # channel actually look like?" Requires 'Phenotype_Category' AND
+    # root_path (to find each picked vesicle's saved crop PNG on disk).
+    if 'Phenotype_Category' not in df.columns:
+        print("  -> Skipping representative channel images "
+              "('Phenotype_Category' not found — run phenotype analysis first).")
+    elif root_path is None:
+        print("  -> Skipping representative channel images "
+              "(no root_path passed in — needed to locate saved crop images).")
+    else:
+        rep_vesicles_df = select_representative_vesicles(df, batch_output_dir)
+        if rep_vesicles_df is not None:
+            plotting.plot_representative_channel_images(
+                rep_vesicles_df, root_path, batch_output_dir)
 
     print("  -> Batch Analysis Complete.\n")
 

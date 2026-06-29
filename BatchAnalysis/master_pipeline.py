@@ -52,6 +52,15 @@ def main():
     df.to_csv(master_csv_path, index=False)
     print(f"Master CSV saved: {master_csv_path}\n")
 
+    # ─── Step 2.5: Load all radial intensity profiles ────────────────────────
+    # Each vesicle's full radially-averaged membrane/actin curve (one row per
+    # radius point), written by skeleton.create_radial_profile_csv via
+    # main.py. Returns None if no Radial_Intensity_Profiles.csv files are
+    # found (e.g. if main.py hasn't been re-run since this feature was added)
+    # — the pipeline still runs fine without it, just skips the
+    # representative-profile comparison in Step 6 below.
+    radial_df = file_handling.load_radial_profiles(ROOT_PATH, CATEGORIES)
+
     # ─── Step 3: Size Distribution ───────────────────────────────────────────
     # Violin + scatter + box plot of vesicle radius for all 4 conditions.
     # Also saves descriptive statistics (mean, std, SEM) to CSV.
@@ -106,7 +115,11 @@ def main():
     #   Batch_Size_Distribution.png            — radius across batches
     #   Batch_Phenotype_Composition.png        — % of each phenotype per batch
     #   Batch_Actin_Metrics_All_Conditions.png — actin metrics, dots by phenotype
-    analysis_batch.run_batch_analysis(df, results_dir)
+    #   Representative_Radial_Profiles.csv     — median/IQR actin curve per Condition x Phenotype
+    #   Plot_Representative_Radial_Profiles.pdf — Lumenal/Sparse/Continuous, Branched+Linear overlaid
+    #   Representative_Vesicles.csv            — which vesicle was picked per Condition x Phenotype
+    #   Representative_Channel_Images.pdf      — membrane/actin crop grid for those picks
+    analysis_batch.run_batch_analysis(df, results_dir, radial_df, ROOT_PATH)
 
     # ─── Step 7: Cross-Condition Comparison ──────────────────────────────────
     # MUST come after Step 4 (phenotype classification), because the

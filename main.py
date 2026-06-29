@@ -43,24 +43,24 @@ import os
 # ===========================================================================
 
 ## Specify paths to the directories containing the data:
-path_membrane   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Empty\260227_Empty_3\ImageSequences\C1"
-path_detected   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Empty\260227_Empty_3\ImageSequences\C1\Detected"
+path_membrane   = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C1"
+path_detected   = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C1\detected"
 path_septin     = r""
-path_actin      = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Empty\260227_Empty_3\ImageSequences\C3"
+path_actin      = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C3"
 
 # Where to save all output files and plots:
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
 # A unique name for this specific dataset
 # Change this every time you point at a different data folder.
-dataset_name = "260227_Empty_3"  
+dataset_name = "260227_Factin_2"  
 
 # ===========================================================================
 #  WHICH PROTEINS ARE PRESENT?
 # ===========================================================================
 
 Septin = False
-Actin  = False
+Actin  = True
 
 # ===========================================================================
 #  ANALYSIS CONFIGURATION
@@ -173,6 +173,13 @@ ANALYSIS_CONFIG = {
 
     # Save radial and angular intensity profile plots for each vesicle.
     'plot_int_profiles': True,
+
+    # Save standalone, clean membrane/actin crop images (scale bar, no
+    # text) for each vesicle. Independent of 'plot_int_profiles' above —
+    # these are what the batch-level "representative channel images"
+    # comparison figure pulls from later, so leave this True even if you
+    # turn 'plot_int_profiles' off to save time/disk space.
+    'save_channel_crops': True,
 }
 
 # ===========================================================================
@@ -238,6 +245,13 @@ for s in range(num_sets):
     # Create the CSV file and write its header row
     output_csv_path = skl.create_output_file(final_output_path, proteins_present)
 
+    # NEW: Create the per-vesicle radial intensity profile CSV.
+    # This stores the raw radially-averaged membrane/actin curves (one row
+    # per radius point per vesicle) that the Int_prof_Radial plots are
+    # drawn from — useful for re-plotting or pooling profiles later
+    # without having to re-run the whole pipeline.
+    radial_csv_path = skl.create_radial_profile_csv(final_output_path)
+
     # Read image channels and vesicle coordinates
     channels_data, coordinates, pixel_size = skl.read_files(
         path_membrane, path_septin, path_actin, path_detected,
@@ -296,6 +310,7 @@ for s in range(num_sets):
             ANALYSIS_CONFIG['plot_mask'],
             pixel_size,
             ANALYSIS_CONFIG,
+            ANALYSIS_CONFIG['save_channel_crops'],
         )
         for i in range(num_vesicles)
     )
@@ -310,10 +325,23 @@ for s in range(num_sets):
     with open(output_csv_path, "a", newline='') as output_file:
         writer = csv.writer(output_file)
 
-        for row, refined_radius in results:
-            writer.writerow(row)
-            if refined_radius is not None and refined_radius > 0:
-                all_refined_radii.append(refined_radius)
+        # NEW: also open the radial profile CSV in append mode, so we can
+        # write every vesicle's radial-profile rows right alongside its
+        # Analysis_Results.csv summary row, in the same pass over `results`.
+        with open(radial_csv_path, "a", newline='') as radial_file:
+            radial_writer = csv.writer(radial_file)
+
+            for row, refined_radius, radial_profile_rows in results:
+                writer.writerow(row)
+                if refined_radius is not None and refined_radius > 0:
+                    all_refined_radii.append(refined_radius)
+
+                # radial_profile_rows is a LIST of rows (one per radius
+                # point), so we use writerows (plural) instead of writerow.
+                # It's None for vesicles that hit the very first "margins"
+                # exit, before any radial profile existed yet.
+                if radial_profile_rows is not None:
+                    radial_writer.writerows(radial_profile_rows)
 
     # Plot histogram of vesicle sizes
     skl.plot_size_distribution(all_refined_radii, final_output_path)
