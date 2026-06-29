@@ -2,19 +2,6 @@
 """
 MASTER PIPELINE
 Orchestrates loading, processing, and analyzing GUV batch data.
-
-CHANGES FROM PREVIOUS VERSION:
--------------------------------
-1. CATEGORIES now contains all 4 experimental conditions.
-2. Each condition has its own phenotyping logic (see analysis_phenotype.py).
-3. NEW: Batch-to-batch variability analysis added as the final step.
-        This generates plots and statistics showing how reproducible
-        each condition is across different experiment runs.
-        See analysis_batch.py for details.
-4. NEW: Cross-condition comparison analysis added as step 7.
-        This answers: do cortex GUVs have larger radii? How do branched
-        and linear cortices differ? Does actin leak into the lumen?
-        See analysis_comparison.py for details.
 """
 
 import os

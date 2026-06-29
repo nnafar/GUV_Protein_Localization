@@ -373,8 +373,8 @@ def run_comparison_tests(df, output_dir):
     print("      E. Phenotype-stratified (CONTINUOUS only)...")
 
     if 'Phenotype_Category' in df.columns:
-        b_cont = branched_df[branched_df['Phenotype_Category'] == 'CONTINUOUS']
-        l_cont = linear_df[linear_df['Phenotype_Category'] == 'CONTINUOUS']
+        b_cont = branched_df[branched_df['Phenotype_Category'] == 'Continuous']
+        l_cont = linear_df[linear_df['Phenotype_Category'] == 'Continuous']
 
         for metric in ACTIN_METRICS + LUMEN_METRICS:
             if metric not in df.columns:

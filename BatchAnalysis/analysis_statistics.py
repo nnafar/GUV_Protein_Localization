@@ -298,7 +298,7 @@ def compute_summary_statistics_cortex_only(df, output_dir):
     # Remove GUVs that failed to form a membrane-associated cortex.
     # non_cortex matches the _NON_CORTEX_PHENOTYPES set in plotting.py
     # — both must stay in sync if phenotype labels ever change.
-    non_cortex = {'EMPTY', 'LUMENAL', 'EXCLUDED'}
+    non_cortex = {'Empty', 'Lumenal', 'Excluded'}
     filtered   = df[~df['Phenotype_Category'].isin(non_cortex)].copy()
 
     n_removed = len(df) - len(filtered)
@@ -531,8 +531,8 @@ def run_comparison_tests(df, output_dir):
     print("      E. Phenotype-stratified (CONTINUOUS only)...")
 
     if 'Phenotype_Category' in df.columns:
-        b_cont = branched_df[branched_df['Phenotype_Category'] == 'CONTINUOUS']
-        l_cont = linear_df[linear_df['Phenotype_Category'] == 'CONTINUOUS']
+        b_cont = branched_df[branched_df['Phenotype_Category'] == 'Continuous']
+        l_cont = linear_df[linear_df['Phenotype_Category'] == 'Continuous']
 
         for metric in ACTIN_METRICS + LUMEN_METRICS:
             if metric not in df.columns:

@@ -115,9 +115,9 @@ METRIC_LABELS = {
 # This is exactly the subset used in the phenotype-stratified
 # comparison (Analysis Group E in analysis_comparison.py).
 CORTEX_FORMING_FILTER = {
-    'Factin':         {'SHELL'},
-    'BranchedCortex': {'CONTINUOUS'},
-    'LinearCortex':   {'CONTINUOUS'},
+    'Factin':         {'Shell'},
+    'BranchedCortex': {'Continuous'},
+    'LinearCortex':   {'Continuous'},
 }
 
 # Bootstrap parameters for the sensitivity check.
@@ -380,9 +380,9 @@ def run_pca_statistical_tests(scores_df, output_dir):
 
     # The three groups in the cortex-forming subset.
     groups = [
-        ('Factin',         'SHELL',      'F-actin SHELL'),
-        ('BranchedCortex', 'CONTINUOUS', 'Branched CONTINUOUS'),
-        ('LinearCortex',   'CONTINUOUS', 'Linear CONTINUOUS'),
+        ('Factin',         'Shell',      'F-actin SHELL'),
+        ('BranchedCortex', 'Continuous', 'Branched CONTINUOUS'),
+        ('LinearCortex',   'Continuous', 'Linear CONTINUOUS'),
     ]
 
     # Build a dict of per-group score arrays for each PC.
@@ -591,6 +591,10 @@ def _plot_loadings(loadings, output_dir):
     Reads like "PCi is built from metric x with weight L_{ij}."
     """
     fig, ax = plt.subplots(figsize=(4.0, 3.0))
+    # Read the actual canvas width back from the figure rather than
+    # hardcoding it a second time — stays correct even if the figsize
+    # above is ever changed.
+    fig_width = fig.get_size_inches()[0]
 
     metric_labels = [METRIC_LABELS[m] for m in PCA_METRICS]
     x = np.arange(len(metric_labels))
@@ -605,13 +609,20 @@ def _plot_loadings(loadings, output_dir):
 
     ax.axhline(0, color='black', linewidth=0.6)
     ax.set_xticks(x)
+    # PLOT_STYLE['fontsize_tick'] doesn't exist anymore -- the key was
+    # renamed to 'fontsize_tick_pt' when plotting.py centralized styling,
+    # and at the same time the *meaning* changed: it's now a printed-point
+    # TARGET that needs to go through _fs_for_width() to become an actual
+    # matplotlib fontsize for this figure's specific canvas width (this
+    # plot is much narrower than the pipeline's other figures, so it needs
+    # its own scaling rather than reusing the single-column default).
     ax.set_xticklabels(metric_labels, rotation=0,
-                       fontsize=plotting.PLOT_STYLE['fontsize_tick'])
+                       fontsize=plotting._fs_for_width('tick', fig_width))
     ax.set_ylabel('Loading on z-scored metric',
-                  fontsize=plotting.PLOT_STYLE['fontsize_label'])
+                  fontsize=plotting._fs_for_width('label', fig_width))
     ax.set_ylim(-1.0, 1.0)
     ax.legend(loc='lower right', frameon=False,
-              fontsize=plotting.PLOT_STYLE['fontsize_legend'])
+              fontsize=plotting._fs_for_width('legend', fig_width))
 
     sns.despine(ax=ax)
     fig.tight_layout()
@@ -627,6 +638,7 @@ def _plot_scree(var_ratio, output_dir):
     Scree plot: explained variance per PC, with cumulative line.
     """
     fig, ax = plt.subplots(figsize=(3.2, 2.6))
+    fig_width = fig.get_size_inches()[0]
 
     pcs = ['PC1', 'PC2', 'PC3']
     pct = var_ratio * 100
@@ -639,16 +651,16 @@ def _plot_scree(var_ratio, output_dir):
              markersize=4, label='Cumulative')
     ax2.set_ylim(0, 105)
     ax2.set_ylabel('Cumulative (%)',
-                   fontsize=plotting.PLOT_STYLE['fontsize_label'])
+                   fontsize=plotting._fs_for_width('label', fig_width))
 
     # Numerical labels on each bar.
     for i, v in enumerate(pct):
         ax.text(i, v + 1.5, f"{v:.1f}%", ha='center',
-                fontsize=plotting.PLOT_STYLE['fontsize_annot'])
+                fontsize=plotting._fs_for_width('annot', fig_width))
 
     ax.set_ylim(0, 105)
     ax.set_ylabel('Explained variance (%)',
-                  fontsize=plotting.PLOT_STYLE['fontsize_label'])
+                  fontsize=plotting._fs_for_width('label', fig_width))
 
     sns.despine(ax=ax, right=False)
     fig.tight_layout()
@@ -690,12 +702,13 @@ def _plot_scatter(scores_df, output_dir):
     g.ax_joint.axhline(0, color='black', linewidth=0.4, linestyle='--', alpha=0.5)
     g.ax_joint.axvline(0, color='black', linewidth=0.4, linestyle='--', alpha=0.5)
 
+    fig_width = g.fig.get_size_inches()[0]
     g.ax_joint.set_xlabel('PC1  (cortex maturity)',
-                          fontsize=plotting.PLOT_STYLE['fontsize_label'])
+                          fontsize=plotting._fs_for_width('label', fig_width))
     g.ax_joint.set_ylabel('PC2  (architectural identity)',
-                          fontsize=plotting.PLOT_STYLE['fontsize_label'])
+                          fontsize=plotting._fs_for_width('label', fig_width))
     g.ax_joint.legend(loc='upper right', frameon=False,
-                      fontsize=plotting.PLOT_STYLE['fontsize_legend'])
+                      fontsize=plotting._fs_for_width('legend', fig_width))
 
     sns.despine(ax=g.ax_joint)
 

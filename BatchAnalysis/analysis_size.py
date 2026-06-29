@@ -28,19 +28,61 @@ CHANGES FROM PREVIOUS VERSION:
    Size_Excluded_Fractions.csv. This is the left-truncation fraction that
    the chapter's size-statistics paragraph should disclose to be honest
    about what is being summarised.
+
+5. NEW: Size_Statistics_Summary.csv now also reports Median, IQR_25, IQR_75,
+   Skewness, and Skewness_Interpretation -- computed on the SAME analysable
+   subset as the mean/std/SEM and the violin/box plot itself.
+
+   WHY THIS MATTERS:
+   Distribution_Shape_PerCondition.csv (in analysis_distribution_shape.py)
+   also reports a radius skewness, but on the FULL, unfiltered population
+   (by design -- see that module's docstring). That number does NOT
+   describe the same vesicles as the median/IQR reported here, or as the
+   violin plot the reader is looking at. Any Results-section sentence that
+   reports skewness ALONGSIDE the median/IQR for this figure should cite
+   THIS table, not Distribution_Shape_PerCondition.csv, or the two
+   statistics in the same sentence will silently refer to two different
+   populations.
 """
 
 import pandas as pd
 import os
+from scipy.stats import skew
 import plotting
+
+
+def _interpret_skewness(s):
+    """
+    Returns a short human-readable label for a skewness value.
+    Same convention as analysis_distribution_shape.py's _interpret_skewness,
+    duplicated here (rather than imported) so this module stays
+    self-contained, per the project's "no cross-module dependencies between
+    analysis modules" pattern.
+
+        |s| < 0.5         -> approximately symmetric
+        0.5 <= |s| < 1.0  -> moderately skewed
+        |s| >= 1.0        -> highly skewed
+    """
+    if pd.isna(s):
+        return "n/a"
+    a = abs(s)
+    direction = "right" if s > 0 else "left"
+    if a < 0.5:
+        return "approximately symmetric"
+    if a < 1.0:
+        return f"moderately {direction}-skewed"
+    return f"highly {direction}-skewed"
 
 
 def save_size_statistics(df_analysable, output_dir):
     """
-    Calculates descriptive statistics (mean, std, SEM, count) for vesicle radius
-    grouped by condition (Category), and saves them to a CSV file.
+    Calculates descriptive statistics (mean, std, SEM, median, IQR,
+    skewness, count) for vesicle radius grouped by condition (Category),
+    and saves them to a CSV file.
 
-    Computed on the ANALYSABLE subset only (Shape_Quality_Flag == True).
+    Computed on the ANALYSABLE subset only (Shape_Quality_Flag == True) --
+    i.e. exactly the vesicles shown in the violin/scatter/box plot. This is
+    what makes every number in this CSV directly traceable to that figure.
 
     Think of this like calculating the average height of students
     in different classes and writing it down -- but only counting
@@ -48,21 +90,52 @@ def save_size_statistics(df_analysable, output_dir):
     """
     print("  -> Calculating Size Statistics (analysable vesicles only)...")
 
-    stats = (
-        df_analysable.groupby('Category')['Refined Radius (um)']
-        .agg(['mean', 'std', 'sem', 'count'])
-        .rename(columns={
-            'mean':  'Mean_GUV_radius_um',
-            'std':   'Std_Dev_um',
-            'sem':   'SEM_um',
-            'count': 'N_Vesicles',
-        })
-        .reset_index()
-    )
+    rows = []
+    for category, group in df_analysable.groupby('Category'):
+        values = group['Refined Radius (um)'].dropna()
+        n = len(values)
+
+        if n == 0:
+            continue
+
+        row = {
+            'Category':           category,
+            'Mean_GUV_radius_um': round(float(values.mean()), 4),
+            'Std_Dev_um':         round(float(values.std()),  4),
+            'SEM_um':             round(float(values.sem()),  4),
+            'Median_GUV_radius_um': round(float(values.median()), 4),
+            'IQR_25_um':          round(float(values.quantile(0.25)), 4),
+            'IQR_75_um':          round(float(values.quantile(0.75)), 4),
+            'N_Vesicles':         int(n),
+        }
+
+        # Skewness needs a reasonable sample size to be trustworthy.
+        # Every condition here has N in the thousands, so MIN_N is a
+        # formality, but the guard keeps this safe if ever re-run on a
+        # smaller / pilot dataset.
+        if n >= 8:
+            s = float(skew(values.values, bias=False))
+            row['Skewness'] = round(s, 4)
+            row['Skewness_Interpretation'] = _interpret_skewness(s)
+        else:
+            row['Skewness'] = float('nan')
+            row['Skewness_Interpretation'] = "n/a"
+
+        rows.append(row)
+
+    stats = pd.DataFrame(rows)
 
     path = os.path.join(output_dir, "Size_Statistics_Summary.csv")
     stats.to_csv(path, index=False)
     print(f"  -> Size statistics saved: {path}")
+
+    # Console summary so the population-consistent numbers are visible
+    # without opening the CSV.
+    print("\n      === Size statistics (analysable subset, matches the plot) ===")
+    print(stats.to_string(index=False))
+    print()
+
+    return stats
 
 
 def save_excluded_fractions(df_full, output_dir):

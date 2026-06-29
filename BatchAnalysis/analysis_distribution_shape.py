@@ -124,8 +124,8 @@ CONDITION_ORDER = ['Empty', 'Factin', 'BranchedCortex', 'LinearCortex']
 
 # Phenotype display order
 PHENOTYPE_ORDER = [
-    'EMPTY', 'EXCLUDED', 'LUMENAL', 'SHELL',
-    'SPARSE', 'PATCHY', 'CONTINUOUS',
+    'Empty', 'Excluded', 'Lumenal', 'Shell',
+    'Sparse', 'Patchy', 'Continuous',
 ]
 
 # Minimum sample size required to compute shape moments reliably.

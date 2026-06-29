@@ -41,110 +41,110 @@ def _classify_branched_cortex(row):
     Classifies a single BranchedCortex vesicle row.
 
     Decision tree:
-    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
-    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed for this vesicle)
+    ─ Shape_Quality_Flag == False? → Excluded  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → Excluded  (actin analysis failed for this vesicle)
     ─ Is localization <= 0?
-        ─ Is lumen/bg <= 2?        → EMPTY     (no actin anywhere)
-        ─ Otherwise                → LUMENAL   (actin is inside, not on membrane)
-    ─ Is localization <= 0.65?     → SPARSE    (some cortex but not dense)
-    ─ Is gini > 0.45?              → PATCHY    (dense but uneven / clustered)
-    ─ Otherwise                    → CONTINUOUS (dense and uniform cortex)
+        ─ Is lumen/bg <= 2?        → Empty     (no actin anywhere)
+        ─ Otherwise                → Lumenal   (actin is inside, not on membrane)
+    ─ Is localization <= 0.65?     → Sparse    (some cortex but not dense)
+    ─ Is gini > 0.45?              → Patchy    (dense but uneven / clustered)
+    ─ Otherwise                    → Continuous (dense and uniform cortex)
     """
     # Size-based exclusion comes first. .get() default True means the
     # classifier still works on CSVs that pre-date the flag column.
     if not row.get('Shape_Quality_Flag', True):
-        return "EXCLUDED"
+        return "Excluded"
 
     if pd.isna(row.get('t_cortex')):
-        return "EXCLUDED"
+        return "Excluded"
 
     loc         = row.get('A localization', 0)
     lumen_ratio = row.get('A Lumen/Bg', 0)
     gini        = row.get('Gini_Index', 0)
 
     if loc <= 0.0:
-        return "EMPTY" if lumen_ratio <= 2.0 else "LUMENAL"
+        return "Empty" if lumen_ratio <= 2.0 else "Lumenal"
     if loc <= 0.65:          # <-- TUNE THIS if needed for BranchedCortex
-        return "SPARSE"
-    return "PATCHY" if gini > 0.45 else "CONTINUOUS"
+        return "Sparse"
+    return "Patchy" if gini > 0.45 else "Continuous"
 
 
 def _classify_linear_cortex(row):
     """
     Classifies a single LinearCortex vesicle row.
 
-    PHENOTYPES (3 only — PATCHY is intentionally absent):
-    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
-    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed)
+    PHENOTYPES (3 only — Patchy is intentionally absent):
+    ─ Shape_Quality_Flag == False? → Excluded  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → Excluded  (actin analysis failed)
     ─ Is localization <= 0?
-        ─ Is lumen/bg <= 2?        → EMPTY     (no actin anywhere)
-        ─ Otherwise                → LUMENAL   (actin inside, not at membrane)
-    ─ Is localization <= 0.65?     → SPARSE    (partial cortex)
-    ─ Otherwise                    → CONTINUOUS (well-formed linear cortex)
+        ─ Is lumen/bg <= 2?        → Empty     (no actin anywhere)
+        ─ Otherwise                → Lumenal   (actin inside, not at membrane)
+    ─ Is localization <= 0.65?     → Sparse    (partial cortex)
+    ─ Otherwise                    → Continuous (well-formed linear cortex)
 
     WHY NO PATCHY:
     Linear actin networks (formins, fascin bundles) do not form the discrete
     nucleation patches that branched Arp2/3 networks do. Inspection of the
     Gini_Index pair plot shows all LinearCortex vesicles cluster at Gini
     0.40–0.48 regardless of localization — there is no separation between
-    any sub-groups, so PATCHY carries no biological meaning here.
+    any sub-groups, so Patchy carries no biological meaning here.
 
     The localization threshold of 0.65 reflects the natural valley between
     the two peaks visible in the A localization KDE (~0.50 and ~0.85).
     """
     if not row.get('Shape_Quality_Flag', True):
-        return "EXCLUDED"
+        return "Excluded"
 
     if pd.isna(row.get('t_cortex')):
-        return "EXCLUDED"
+        return "Excluded"
 
     loc         = row.get('A localization', 0)
     lumen_ratio = row.get('A Lumen/Bg', 0)
 
     if loc <= 0.0:
-        return "EMPTY" if lumen_ratio <= 2.0 else "LUMENAL"
+        return "Empty" if lumen_ratio <= 2.0 else "Lumenal"
     if loc <= 0.65:      # <-- TUNE THIS if your data suggests a different valley
-        return "SPARSE"
-    return "CONTINUOUS"
+        return "Sparse"
+    return "Continuous"
 
 
 def _classify_factin(row):
     """
     Classifies a single Factin vesicle into two phenotypes only:
 
-    SHELL    — Actin is concentrated at the membrane (forms a cortex/shell).
+    Shell    — Actin is concentrated at the membrane (forms a cortex/shell).
                Indicated by a high localization score.
 
-    LUMENAL  — Actin is distributed throughout the vesicle interior.
+    Lumenal  — Actin is distributed throughout the vesicle interior.
                Indicated by a low localization score but detectable lumen signal.
 
     Decision tree:
-    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
-    ─ Is t_cortex NaN?             → EXCLUDED  (actin analysis failed)
-    ─ Is localization NaN?         → EXCLUDED  (localization not computed)
-    ─ Is localization > 0.30?      → SHELL
-    ─ Otherwise                    → LUMENAL
+    ─ Shape_Quality_Flag == False? → Excluded  (sub-threshold size; not analysable)
+    ─ Is t_cortex NaN?             → Excluded  (actin analysis failed)
+    ─ Is localization NaN?         → Excluded  (localization not computed)
+    ─ Is localization > 0.30?      → Shell
+    ─ Otherwise                    → Lumenal
 
     *** TUNE THE THRESHOLD BELOW ***
-    A localization score > 0.30 is used as the default cut-off for SHELL.
+    A localization score > 0.30 is used as the default cut-off for Shell.
     This means: "at least 30% more actin at the membrane than in the lumen."
     Inspect your data and adjust if needed.
     """
     if not row.get('Shape_Quality_Flag', True):
-        return "EXCLUDED"
+        return "Excluded"
 
     if pd.isna(row.get('t_cortex')):
-        return "EXCLUDED"
+        return "Excluded"
 
     loc = row.get('A localization', 0)
 
     if pd.isna(loc):
-        return "EXCLUDED"
+        return "Excluded"
 
     if loc > 0.30:       # <-- TUNE THIS: threshold for 'forms a shell'
-        return "SHELL"
+        return "Shell"
     else:
-        return "LUMENAL"
+        return "Lumenal"
 
 
 def _classify_empty(row):
@@ -153,17 +153,17 @@ def _classify_empty(row):
     whether they passed the size analysability threshold.
 
     Decision tree:
-    ─ Shape_Quality_Flag == False? → EXCLUDED  (sub-threshold size; not analysable)
-    ─ Otherwise                    → EMPTY
+    ─ Shape_Quality_Flag == False? → Excluded  (sub-threshold size; not analysable)
+    ─ Otherwise                    → Empty
 
-    Note: the EXCLUDED branch is necessary here even though Empty has no
-    actin channel, because we want the per-condition EXCLUDED counts to
+    Note: the Excluded branch is necessary here even though Empty has no
+    actin channel, because we want the per-condition Excluded counts to
     reflect size failures consistently across all four conditions.
     """
     if not row.get('Shape_Quality_Flag', True):
-        return "EXCLUDED"
+        return "Excluded"
 
-    return "EMPTY"
+    return "Empty"
 
 
 # =============================================================================
@@ -199,8 +199,8 @@ def categorize_vesicles(df):
     def dispatch(row):
         classifier = _CLASSIFIERS.get(row['Category'])
         if classifier is None:
-            # Unknown condition — label as EXCLUDED
-            return "EXCLUDED"
+            # Unknown condition — label as Excluded
+            return "Excluded"
         return classifier(row)
 
     df['Phenotype_Category'] = df.apply(dispatch, axis=1)
@@ -236,7 +236,7 @@ def run_phenotype_analysis(df, output_dir):
                 continue
             n_total      = len(cond)
             n_size_fail  = (~cond['Shape_Quality_Flag']).sum()
-            n_excluded   = (cond['Phenotype_Category'] == 'EXCLUDED').sum()
+            n_excluded   = (cond['Phenotype_Category'] == 'Excluded').sum()
             # Vesicles labelled EXCLUDED but with a valid size flag are actin
             # analysis failures (only happens in actin-containing conditions).
             n_actin_fail = n_excluded - n_size_fail
