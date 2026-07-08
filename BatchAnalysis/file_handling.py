@@ -102,6 +102,21 @@ def _scan_and_tag_csv_files(root_path, categories, filename, required_column):
             print(f"  ✗ Skipped (missing '{required_column}' column): {file_path}")
             continue
 
+        # ---- Skip files that have a header but ZERO data rows ----
+        # This happens whenever a region's detected_vesicles.csv had no
+        # vesicles in it at all: main.py still writes the header line (via
+        # create_output_file / create_radial_profile_csv), but
+        # process_single_vesicle is never called for that region, so no
+        # data rows ever get appended. An empty DataFrame is harmless to
+        # concatenate later, but anything downstream that does
+        # df['some_column'].iloc[0] (e.g. the per-file print loop in
+        # load_and_process_data) would crash on it with "IndexError:
+        # single positional indexer is out-of-bounds" — so we drop it here,
+        # at the source, before it can reach any of that code.
+        if len(df) == 0:
+            print(f"  - Skipped (0 data rows — header only): {file_path}")
+            continue
+
         # ---- Tag each row with its origin ----
         df['Category']  = assigned_category
         df['Batch_ID']  = experiment_folder
@@ -194,16 +209,53 @@ def load_and_process_data(root_path, categories):
     #     'min_vesicle_radius_um' in main.py's ANALYSIS_CONFIG ***
     MIN_VESICLE_RADIUS_UM = 2.50   # µm
 
-    # Boolean flag: True for vesicles that should be analysed for cortex/actin.
-    master_df['Shape_Quality_Flag'] = (
+    size_ok = (
         master_df['Refined Radius (um)'].notna() &
         (master_df['Refined Radius (um)'] >= MIN_VESICLE_RADIUS_UM)
     )
-    
+
+    # ---- Filter 3: Membrane signal strength ----
+    # Size alone isn't enough -- membrane_detection() in skeleton.py finds
+    # the "tallest point" in a vesicle's own radial profile using THRESHOLDS
+    # RELATIVE TO THAT PROFILE'S OWN MAX (e.g. height >= 10% of its own peak).
+    # That means a region of pure background noise -- no real vesicle at all --
+    # will still always produce *a* peak, because noise always has *some*
+    # tallest point relative to itself. The result is a "vesicle" with a
+    # plausible-looking radius but no real membrane underneath it.
+    #
+    # skeleton.py already catches this with check_membrane_quality(), which
+    # tags any vesicle whose mean membrane brightness is below 10 (your
+    # camera's noise floor, same value used elsewhere as 'sector_peak_min_signal')
+    # with the comment "weak_membrane_signal". Until now that tag was written
+    # to the CSV but never used to exclude anything -- this filter is what
+    # connects it to Shape_Quality_Flag.
+    #
+    # NOTE: this reads the comment text rather than recomputing mean
+    # membrane intensity from the images, so it works on your EXISTING
+    # Analysis_Results.csv files -- no need to re-run the full imaging
+    # pipeline. Re-running file_handling.py onward is enough.
+    signal_ok = ~master_df['Comment'].fillna('').str.contains(
+        'weak_membrane_signal')
+
+    # Boolean flag: True for vesicles that should be analysed for cortex/actin.
+    # A vesicle must pass BOTH the size check AND the signal check.
+    master_df['Shape_Quality_Flag'] = size_ok & signal_ok
+
+    n_size_excluded   = (~size_ok).sum()
+    n_signal_excluded = (size_ok & ~signal_ok).sum()  # signal-only failures,
+                                                        # so we don't double-count
+                                                        # rows that failed both
     n_excluded = (~master_df['Shape_Quality_Flag']).sum()
-    if n_excluded > 0:
-        print(f"  → Flagged {n_excluded} vesicles as size-EXCLUDED "
+
+    if n_size_excluded > 0:
+        print(f"  → Flagged {n_size_excluded} vesicles as size-EXCLUDED "
               f"(refined radius NaN or < {MIN_VESICLE_RADIUS_UM} µm)")
+    if n_signal_excluded > 0:
+        print(f"  → Flagged {n_signal_excluded} additional vesicles as "
+              f"signal-EXCLUDED (weak_membrane_signal: likely noise, "
+              f"no real membrane detected)")
+    if n_excluded > 0:
+        print(f"  → Total excluded: {n_excluded} / {len(master_df)} vesicles")
 
     # ---- Summary ----
     print(f"\n  ✓ Total vesicles loaded: {len(master_df)}")

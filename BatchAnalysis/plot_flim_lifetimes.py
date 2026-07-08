@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 PLOT FLIM LIFETIMES
-Reads FLIM tau (ns) data for Branched vs Linear cortices and plots it using
-the same violin/box drawing engine and paper style as the rest of the
+Reads FLIM tau (ns) data for Factin, Branched, and Linear cortices and plots it 
+using the same violin/box drawing engine and paper style as the rest of the
 GUV pipeline (plotting.py). Keep this file in the same folder as
 plotting.py so it can import the shared style/helpers from there.
 """
@@ -16,8 +16,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # ── Import the shared style + drawing engine straight from plotting.py ────
-# This is the same approach plotting.py itself uses to keep one definition
-# of "what a violin/box comparison looks like" instead of duplicating it.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plotting import (
     set_paper_style,
@@ -42,16 +40,16 @@ FLIM_CSV_PATH = r"M:\tnw\bn\gk\NN\2_Data-Analysis\FLIM\FLIM_Lifetimes.csv"
 # same function master_pipeline.py uses to build results_dir, so this
 # resolves to the SAME "Batch_Analysis_Results" folder the rest of your
 # pipeline already saves into -- not a separate copy of that path string.
-ROOT_PATH = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
-OUTPUT_DIR = file_handling.create_output_folder(ROOT_PATH, "Batch_Analysis_Results")
+ROOT_PATH = r"M:\tnw\bn\gk\NN\2_Data-Analysis\FLIM"
+OUTPUT_DIR = file_handling.create_output_folder(ROOT_PATH, "Output")
 # ============================================================
 
-# FLIM-specific category order/palette. Colors match the Branched/Linear
-# hues used elsewhere in the pipeline (CONDITION_PALETTE's
-# BranchedCortex/LinearCortex), so this figure sits visually consistently
+# FLIM-specific category order/palette. Colors match the Factin/Branched/Linear
+# hues used elsewhere in the pipeline, so this figure sits visually consistently
 # next to the other condition-comparison plots.
-FLIM_ORDER = ["Branched", "Linear"]
+FLIM_ORDER = ["Factin", "Branched", "Linear"]
 FLIM_PALETTE = {
+    "Factin":   "#5d6ea6",
     "Branched": "#34487a",
     "Linear":   "#1a243d",
 }
@@ -60,7 +58,7 @@ FLIM_PALETTE = {
 def load_flim_data(csv_path):
     """
     Loads the wide-format FLIM CSV -- one column per condition, NaN-padded
-    at the bottom because Branched and Linear have different N -- and
+    at the bottom because conditions have different N -- and
     reshapes it to long format for plotting: columns ['Category', 'tau'].
     """
     df_wide = pd.read_csv(csv_path)
@@ -88,18 +86,18 @@ def plot_flim_lifetimes(csv_path, output_dir, filename="Plot_FLIM_Lifetimes",
 
     fig, ax = plt.subplots(figsize=_get_figsize_single_col())
     _draw_standard_violin_box(ax, groups, range(len(order)), colors, widths=0.12)
-    ax.set_ylim(bottom=2.3)  # Lifetime can't be negative — always start the axis at 0
+    ax.set_ylim(bottom=2.3)  # Lifetime can't be negative
 
-    # ── Significance bracket (Branched vs Linear) ───────────────────────
-    # Same Mann-Whitney + Cliff's Delta logic used everywhere else in the
-    # pipeline: stars show significance, bracket thickness encodes effect
-    # size, and nothing is drawn at all if the difference is "ns".
-    if len(order) == 2:
-        v_a, v_b = groups[0], groups[1]
+    # ── Significance brackets ───────────────────────────────────────────
+    # Iterates through adjacent pairs to apply the Mann-Whitney + Cliff's Delta 
+    # logic across the three conditions.
+    for i in range(len(order) - 1):
+        v_a, v_b = groups[i], groups[i+1]
         stars, label, lw = _build_stat_label(v_a, v_b)
         if stars != "ns":
-            y_top = max(v_a.max(), v_b.max())
-            _add_bracket(ax, 0, 1, y_top, label, lw=lw, fontsize=_fs("annot"))
+            # Offset y position slightly for adjacent brackets if they overlap
+            y_top = max(v_a.max(), v_b.max()) * (1.02 + (i * 0.02))
+            _add_bracket(ax, i, i+1, y_top, label, lw=lw, fontsize=_fs("annot"))
 
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels(order, fontsize=_fs("tick"))
@@ -116,7 +114,7 @@ def plot_flim_lifetimes(csv_path, output_dir, filename="Plot_FLIM_Lifetimes",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Plot FLIM lifetime (tau, ns) data for Branched vs Linear cortices."
+        description="Plot FLIM lifetime (tau, ns) data for Factin, Branched, and Linear cortices."
     )
     parser.add_argument(
         "csv_path", nargs="?", default=FLIM_CSV_PATH,

@@ -562,6 +562,7 @@ def compute_representative_radial_profiles(df, radial_df, output_dir):
              (Condition, Phenotype, Normalized_Radius) grid point:
                  Condition, Phenotype, N_vesicles, Normalized_Radius,
                  Median_Actin, Q1_Actin, Q3_Actin,
+                 Median_Actin_Normalized, Q1_Actin_Normalized, Q3_Actin_Normalized,
                  Median_Membrane, Q1_Membrane, Q3_Membrane
              or None if radial_df was None or nothing could be matched.
     """
@@ -670,6 +671,25 @@ def compute_representative_radial_profiles(df, radial_df, output_dir):
         return None
 
     rep_df = pd.DataFrame(rep_rows)
+
+    # ── Normalize to the GLOBAL max, so the figure's y-axis doesn't depend
+    #    on this particular imaging session's arbitrary intensity units ──
+    # We divide every curve by the SAME single number (the tallest point
+    # reached by ANY of the 6 curves) — this is a uniform rescale, so it
+    # does NOT change how tall one curve looks relative to another; it
+    # only changes what "1.0" means (it always means "the brightest point
+    # in this whole comparison").
+    global_max = rep_df['Median_Actin'].max()
+    peak_row   = rep_df.loc[rep_df['Median_Actin'].idxmax()]
+    print(f"  -> Normalizing to global max actin intensity: {global_max:.3f} "
+          f"(from {peak_row['Condition']} / {peak_row['Phenotype']})")
+
+    for raw_col, norm_col in [
+        ('Median_Actin', 'Median_Actin_Normalized'),
+        ('Q1_Actin',     'Q1_Actin_Normalized'),
+        ('Q3_Actin',     'Q3_Actin_Normalized'),
+    ]:
+        rep_df[norm_col] = rep_df[raw_col] / global_max
 
     # ── Save the underlying numbers, so every curve in the final figure
     #    can be traced back to a CSV row (same "verify at source" workflow

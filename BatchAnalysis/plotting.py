@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as pe
+from matplotlib.lines import Line2D
 import seaborn as sns
 from scipy.stats import mannwhitneyu
 
@@ -2197,45 +2198,20 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
 _REPRESENTATIVE_PHENOTYPE_ORDER = ['Lumenal', 'Sparse', 'Continuous']
 
 
-def plot_representative_radial_profiles(rep_df, output_dir, _as_figure=False):
+def _find_alignment_x(values, radii, phenotype):
+    """
+    Returns the x-position (Normalized_Radius) that gets shifted to
+    x = 0. All curves are aligned on their maximum value (peak) to 
+    ensure peaks share a common center.
+    """
+    peak_idx = values.argmax()
+    return radii[peak_idx]
+
+def plot_representative_radial_profiles(rep_df, output_dir, figsize=None, _as_figure=False):
     """
     Draws the representative radial actin-intensity profile for Lumenal,
     Sparse, and Continuous GUVs, with BranchedCortex and LinearCortex
-    overlaid in ONE shared panel — so the architectural difference between
-    the two nucleators is visible directly, peak against peak.
-
-    HOW TO TELL THE 6 LINES APART:
-    With two conditions x three phenotypes, this panel has 6 curves. Two
-    visual channels are used so they stay readable instead of becoming
-    "spaghetti":
-        COLOUR     -> Phenotype   (Lumenal / Sparse / Continuous), using
-                      the same PHENOTYPE_PALETTE as every other figure in
-                      this pipeline — so "dark navy" always means
-                      Continuous, everywhere.
-        LINE STYLE -> Condition   (solid = BranchedCortex, dashed =
-                      LinearCortex), via CONDITION_LINESTYLE.
-    This is the same trick as a 2-variable key on a map: shape tells you
-    one thing, colour tells you another, and together they're unambiguous.
-
-    Each curve is the MEDIAN of every cortex-forming-phenotype-matched
-    vesicle's interpolated actin profile at that x-position (normalized
-    radius = radius_um / that vesicle's own refined radius, so x=1.0 always
-    means "at this vesicle's own membrane" regardless of absolute size).
-
-    NOTE ON SPREAD: with 6 overlapping curves in one panel, a shaded
-    inter-quartile band for every single one becomes visually noisy fast,
-    so this version draws medians only (the underlying Q1/Q3 columns are
-    still saved in Representative_Radial_Profiles.csv if you want to add
-    a band back in for a specific comparison later).
-
-    Parameters
-    ----------
-    rep_df     : pandas DataFrame — output of
-                 analysis_batch.compute_representative_radial_profiles(),
-                 with columns Condition, Phenotype, N_vesicles,
-                 Normalized_Radius, Median_Actin, Q1_Actin, Q3_Actin
-                 (Median_Membrane/Q1/Q3 are also present but not drawn here).
-    output_dir : str — folder to save the figure into
+    overlaid in ONE shared panel.
     """
     set_paper_style()
 
@@ -2243,39 +2219,98 @@ def plot_representative_radial_profiles(rep_df, output_dir, _as_figure=False):
     if not conditions:
         return
 
-    fig_width, fig_height = _get_figsize_single_col()
+    if figsize is None:
+        figsize = (2.2, 4.4)
+    fig_width, fig_height = figsize
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
-    # A faint vertical reference line at x=1.0: by construction, every
-    # vesicle's OWN membrane sits at normalized radius = 1.0, so this line
-    # marks "the membrane" the same way for every curve, regardless of any
-    # individual vesicle's (or condition's) absolute size.
-    ax.axvline(1.0, color='#999999', linestyle=':', linewidth=1.0, zorder=1)
+    VIOLIN_PLOT_LATEX_WIDTH_FRACTION    = 0.54
+    RADIAL_PROFILE_LATEX_WIDTH_FRACTION = 0.22
+    RADIAL_PROFILE_FONT_BOOST = VIOLIN_PLOT_LATEX_WIDTH_FRACTION / RADIAL_PROFILE_LATEX_WIDTH_FRACTION
+    LABEL_EXTRA_BOOST  = 1.15
+    RADIAL_PROFILE_LEGEND_BOOST = 2.1
+
+    def _fs_rp_label(role):
+        return _fs_for_width(role, fig_width) * RADIAL_PROFILE_FONT_BOOST * LABEL_EXTRA_BOOST
+
+    def _fs_rp_legend(role):
+        return _fs_for_width(role, fig_width) * RADIAL_PROFILE_LEGEND_BOOST
+
+    fs_label  = _fs_rp_label("label")
+    fs_tick   = _fs_rp_label("tick")
+    fs_legend = _fs_rp_legend("legend")
+
+    ax.axvline(0.0, color='#999999', linestyle=':', linewidth=1.0, zorder=1)
+
+    phenotype_handles = {}
+    all_aligned_min = []
+    all_aligned_max = []
 
     for condition in conditions:
         cond_df    = rep_df[rep_df['Condition'] == condition]
         linestyle  = CONDITION_LINESTYLE.get(condition, '-')
-        cond_label = CONDITION_LABELS.get(condition, condition)
 
         for phenotype in _REPRESENTATIVE_PHENOTYPE_ORDER:
             curve = cond_df[cond_df['Phenotype'] == phenotype].sort_values('Normalized_Radius')
             if curve.empty:
                 continue
 
+            values = curve['Median_Actin_Normalized'].to_numpy()
+            radii  = curve['Normalized_Radius'].to_numpy()
+
+            alignment_x = _find_alignment_x(values, radii, phenotype)
+            aligned_x   = curve['Normalized_Radius'] - alignment_x
+
             color = PHENOTYPE_PALETTE.get(phenotype, '#aaaaaa')
-            n     = int(curve['N_vesicles'].iloc[0])
 
-            ax.plot(
-                curve['Normalized_Radius'], curve['Median_Actin'],
-                color=color, linestyle=linestyle, linewidth=2.0,
-                label=f"{cond_label} \u2013 {phenotype} (N={n})", zorder=3)
+            line, = ax.plot(
+                aligned_x, curve['Median_Actin_Normalized'],
+                color=color, linestyle=linestyle, linewidth=1.6, zorder=3)
 
-    ax.set_xlabel("Normalized radius (r / R)", fontsize=_fs("label"))
-    ax.set_ylabel("Actin intensity (a.u.)", fontsize=_fs("label"))
-    ax.tick_params(labelsize=_fs("tick"))
+            all_aligned_min.append(aligned_x.min())
+            all_aligned_max.append(aligned_x.max())
 
-    # Two columns keep a 6-entry legend compact instead of one tall list.
-    ax.legend(loc='upper left', ncol=2, fontsize=_fs("legend") * 0.8, frameon=False)
+            if phenotype not in phenotype_handles:
+                phenotype_handles[phenotype] = line
+
+    ax.set_xlabel("(r − r$_{peak}$) / R", fontsize=fs_label)
+    ax.set_ylabel("Actin intensity (normalized to max)", fontsize=fs_label)
+    ax.tick_params(labelsize=fs_tick)
+
+    # Force left boundary negative to clear legend
+    # Cap right boundary to the shortest common curve end to align trace terminations
+    common_x_max = min(all_aligned_max)
+    ax.set_xlim(-1.6, common_x_max)
+    
+    ax.set_ylim(0, 1.15)
+
+    ordered_phenotypes = [p for p in _REPRESENTATIVE_PHENOTYPE_ORDER if p in phenotype_handles]
+
+    branched_handles = [
+        Line2D([0], [0], color=phenotype_handles[p].get_color(),
+               linestyle=CONDITION_LINESTYLE.get('BranchedCortex', '-'), linewidth=1.6)
+        for p in ordered_phenotypes
+    ]
+    linear_handles = [
+        Line2D([0], [0], color=phenotype_handles[p].get_color(),
+               linestyle=CONDITION_LINESTYLE.get('LinearCortex', '--'), linewidth=1.6)
+        for p in ordered_phenotypes
+    ]
+
+    leg1 = ax.legend(
+        branched_handles, ordered_phenotypes, title="Branched",
+        loc='upper left', bbox_to_anchor=(0.0, 1.0), fontsize=fs_legend,
+        title_fontsize=fs_legend, frameon=False, handlelength=1.6,
+        borderaxespad=0.2, labelspacing=0.3)
+    ax.add_artist(leg1)
+
+    # Shifted Linear legend upward to close the gap
+    ax.legend(
+        linear_handles, ordered_phenotypes, title="Linear",
+        loc='upper left', bbox_to_anchor=(0.0, 0.72), fontsize=fs_legend,
+        title_fontsize=fs_legend, frameon=False, handlelength=1.6,
+        borderaxespad=0.2, labelspacing=0.3)
+
     sns.despine(ax=ax)
 
     plt.tight_layout()

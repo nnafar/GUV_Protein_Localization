@@ -1872,6 +1872,31 @@ def process_single_vesicle(ves_coordinates, channels_data, image_dim,
     if quality_comments:
         comment += quality_comments
 
+    # ------------------------------------------------------------------
+    # GATE 4 — Weak/absent membrane signal (likely noise, not a real vesicle)
+    # ------------------------------------------------------------------
+    # STEP 5 always finds *a* peak, because membrane_detection() only
+    # checks height/prominence RELATIVE to this vesicle's own profile --
+    # pure background noise will satisfy that on its own, with no real
+    # membrane underneath it. check_membrane_quality() just flagged that:
+    # mean membrane brightness here is below the noise floor (comment
+    # "weak_membrane_signal"). Rather than just logging that and then
+    # computing real-looking background/localization/lumen numbers from
+    # what is actually noise, treat it the same way GATE 1+2 and GATE 3
+    # treat other unanalysable detections: zero out the results and
+    # record why. (Refined Radius is still reported, same as the other
+    # gates, so file_handling.py's size-based filter still has a number
+    # to look at -- only the signal-derived values are zeroed.)
+    if "weak_membrane_signal" in quality_comments:
+        comment_final = [', '.join(comment)] if comment else ["OK"]
+        row = format_result_row(
+            exp_info, ves_coordinates, background,
+            np.zeros(num_channels - 1), lumen_val,
+            None, None, None, None, refined_radius_um, comment_final,
+            shape_deform_dict=deform_score, shape_sector_data=sector_data)
+        plt.close('all')
+        return row, refined_radius_um, radial_profile_rows
+
     if index_border_in == index_border_out:
         comment.append("no_memb_detected")
         comment_final = [', '.join(comment)] if comment else ["OK"]

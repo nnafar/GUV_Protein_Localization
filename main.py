@@ -43,17 +43,17 @@ import os
 # ===========================================================================
 
 ## Specify paths to the directories containing the data:
-path_membrane   = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C1"
-path_detected   = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C1\detected"
+path_membrane   = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1"
+path_detected   = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1\detected"
 path_septin     = r""
-path_actin      = r"D:\ProteinLocalization\4.Factin\260227_Factin_2\ImageSequence\C3"
+path_actin      = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C3"
 
 # Where to save all output files and plots:
 path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
 # A unique name for this specific dataset
 # Change this every time you point at a different data folder.
-dataset_name = "260227_Factin_2"  
+dataset_name = "260317_LinearCortex_3"  
 
 # ===========================================================================
 #  WHICH PROTEINS ARE PRESENT?
