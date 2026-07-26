@@ -37,19 +37,81 @@ import skeleton as skl
 from joblib import Parallel, delayed
 import csv
 import os
+import argparse
 
 # ===========================================================================
 #  INPUT PATHS
 # ===========================================================================
 
 ## Specify paths to the directories containing the data:
-path_membrane   = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1"
-path_detected   = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1\detected"
-path_septin     = r""
-path_actin      = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C3"
+DEFAULT_MEMBRANE = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1"
+DEFAULT_DETECTED = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C1\detected"
+DEFAULT_SEPTIN = r""
+DEFAULT_ACTIN = r"D:\ProteinLocalization\2.LinearCortex\260317_LinearCortex_3\ImageSequence\C3"
+DEFAULT_OUTPUT_ROOT = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
 
-# Where to save all output files and plots:
-path_to_output_root = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output"
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Process cell/protein image sequences."
+    )
+
+    parser.add_argument(
+        "-m",
+        "-pm",
+        "--path-membrane",
+        "--path_membrane",
+        type=str,
+        default=DEFAULT_MEMBRANE,
+        help="Path to membrane image sequence",
+    )
+    parser.add_argument(
+        "-d",
+        "-pd",
+        "--path-detected",
+        "--path_detected",
+        type=str,
+        default=DEFAULT_DETECTED,
+        help="Path to detected directory",
+    )
+    parser.add_argument(
+        "-s",
+        "-ps",
+        "--path-septin",
+        "--path_septin",
+        type=str,
+        default=DEFAULT_SEPTIN,
+        help="Path to septin channel directory",
+    )
+    parser.add_argument(
+        "-a",
+        "-pa",
+        "--path-actin",
+        "--path_actin",
+        type=str,
+        default=DEFAULT_ACTIN,
+        help="Path to actin channel directory",
+    )
+    parser.add_argument(
+        "-o",
+        "-po",
+        "--path-output-root",
+        "--path-to-output-root",
+        "--path_to_output_root",
+        type=str,
+        default=DEFAULT_OUTPUT_ROOT,
+        help="Root path for saving output files and plots",
+    )
+
+    return parser.parse_args()
+
+args = parse_args()
+
+# Access your variables like this:
+path_membrane = args.path_membrane
+path_detected = args.path_detected
+path_septin = args.path_septin
+path_actin = args.path_actin
+path_to_output_root = args.path_output_root
 
 # A unique name for this specific dataset
 # Change this every time you point at a different data folder.
