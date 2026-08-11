@@ -61,10 +61,10 @@ CSV files:
     PCA_Statistical_Tests.csv       — Mann-Whitney + Cliff's Delta on PC scores
     PCA_Bootstrap_Sensitivity.csv   — loading stability over 200 resamples
 
-Plots:
-    Plot_PCA_Loadings.png   — bar chart: loading of each metric on each PC
-    Plot_PCA_Scree.png      — explained variance per PC
-    Plot_PCA_Scatter.png    — PC1 vs PC2, coloured by condition,
+Plots (saved as PDFs):
+    Plot_PCA_Loadings.pdf   — bar chart: loading of each metric on each PC
+    Plot_PCA_Scree.pdf      — explained variance per PC
+    Plot_PCA_Scatter.pdf    — PC1 vs PC2, coloured by condition,
                               with marginal density curves
 """
 
@@ -79,8 +79,7 @@ from scipy.stats import mannwhitneyu
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-import plotting              # your existing plotting module (colours, styles)
-
+import plotting
 
 # =============================================================================
 # STANDALONE CONFIGURATION
@@ -88,9 +87,9 @@ import plotting              # your existing plotting module (colours, styles)
 # Ignored when imported by master_pipeline.py.
 # =============================================================================
 
-STANDALONE_CSV_PATH   = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output\Batch_Analysis_Results\Vesicle_Phenotype_Assignments.csv"
-STANDALONE_OUTPUT_DIR = r"M:\tnw\bn\gk\NN\2_Data-Analysis\Protein_Localization\Output\Batch_Analysis_Results"
-
+ROOT_PATH = "H:/ProteinLocalization/Output"
+STANDALONE_OUTPUT_DIR = os.path.join(ROOT_PATH, "Batch_Analysis_Results")
+STANDALONE_CSV_PATH = os.path.join(STANDALONE_OUTPUT_DIR, "Vesicle_Phenotype_Assignments.csv")
 
 # =============================================================================
 # CONSTANTS
@@ -102,9 +101,9 @@ PCA_METRICS = ['A localization', 'Gini_Index', 't_cortex']
 
 # Human-readable axis labels for plots and CSVs.
 METRIC_LABELS = {
-    'A localization': 'Localization Score',
-    'Gini_Index':     'Gini Index',
-    't_cortex':       'Cortex Thickness (um)',
+    'A localization': 'Localization\nScore',
+    'Gini_Index':     'Gini\nIndex',
+    't_cortex':       r'Cortex Thickness' '\n' r'($\mu$m)'
 }
 
 # The cortex-forming subset is defined as:
@@ -265,10 +264,6 @@ def fit_pca(subset, output_dir):
     print("  -> Fitting PCA on pooled cortex-forming subset...")
 
     # ---- 1. Extract and z-score the three metrics ----------------------
-    # StandardScaler subtracts the mean and divides by the standard
-    # deviation, separately for each metric, over the POOLED subset.
-    # The result has mean 0 and std 1 for each metric across the
-    # combined Factin + Branched + Linear cortex-forming population.
     X = subset[PCA_METRICS].values
     scaler = StandardScaler()
     X_z = scaler.fit_transform(X)
@@ -280,18 +275,12 @@ def fit_pca(subset, output_dir):
     var_ratio = pca.explained_variance_ratio_
 
     # ---- 3. Sign-fix PC1 ----------------------------------------------
-    # PC1's loading on A localization should be positive.
-    # If it isn't, flip the sign of PC1 and its scores.
     idx_aloc = PCA_METRICS.index('A localization')
     if loadings[0, idx_aloc] < 0:
         loadings[0, :] *= -1
         scores[:, 0]   *= -1
         print("      -> PC1 sign flipped to enforce A_loc > 0 convention")
 
-    # Also sign-fix PC2: we want PC2's loading on t_cortex to be positive
-    # (the prediction is that linear cortices score high on PC2 because
-    # they are thicker). If the data points the other way, this is
-    # arbitrary but stable across runs once fixed.
     idx_tcortex = PCA_METRICS.index('t_cortex')
     if loadings[1, idx_tcortex] < 0:
         loadings[1, :] *= -1
@@ -329,8 +318,6 @@ def fit_pca(subset, output_dir):
     scores_df['PC2'] = np.round(scores[:, 1], 4)
     scores_df['PC3'] = np.round(scores[:, 2], 4)
 
-    # Save a slim CSV with the identifying columns + PC scores
-    # (so downstream consumers don't have to re-load the full dataset).
     slim_cols = ['Date', 'Image', 'Vesicle id', 'Category', 'Batch_ID',
                  'Phenotype_Category', 'Refined Radius (um)'] + PCA_METRICS \
                 + ['PC1', 'PC2', 'PC3']
@@ -358,34 +345,17 @@ def run_pca_statistical_tests(scores_df, output_dir):
     """
     Runs Mann-Whitney U + Cliff's Delta on PC1, PC2, and PC3 between
     each pair of the three cortex-forming subsets.
-
-    The KEY contrast is on PC2 -- this is the architectural-identity axis
-    along which Branched and Linear cortices are expected to diverge.
-    PC1 (maturity) is expected to show small effect sizes between the
-    cortex-forming subsets (all three already represent fully-formed
-    cortices, by selection).
-
-    Parameters
-    ----------
-    scores_df  : output of fit_pca() -- contains PC1, PC2, PC3 columns.
-    output_dir : where to save the CSV.
-
-    Returns
-    -------
-    results_df : DataFrame of all pairwise tests.
     """
     print("  -> Running statistical tests on PC scores...")
 
     results = []
 
-    # The three groups in the cortex-forming subset.
     groups = [
         ('Factin',         'Shell',      'F-actin SHELL'),
         ('BranchedCortex', 'Continuous', 'Branched CONTINUOUS'),
         ('LinearCortex',   'Continuous', 'Linear CONTINUOUS'),
     ]
 
-    # Build a dict of per-group score arrays for each PC.
     pcs = ['PC1', 'PC2', 'PC3']
     group_scores = {}
     for cat, pheno, label in groups:
@@ -393,7 +363,6 @@ def run_pca_statistical_tests(scores_df, output_dir):
                         (scores_df['Phenotype_Category'] == pheno)]
         group_scores[label] = {pc: sub[pc].dropna().values for pc in pcs}
 
-    # Run every pairwise test on every PC.
     labels = [label for _, _, label in groups]
     for pc in pcs:
         for i, label_a in enumerate(labels):
@@ -437,7 +406,6 @@ def run_pca_statistical_tests(scores_df, output_dir):
     results_df.to_csv(path, index=False)
     print(f"      -> Saved: {path}")
 
-    # Console summary.
     print("\n      === PCA-based statistical tests ===")
     for pc, grp_df in results_df.groupby('PC'):
         print(f"\n      [{pc}]")
@@ -462,52 +430,23 @@ def run_bootstrap_sensitivity(subset, output_dir,
     """
     Tests how stable the PCA loadings and explained variance are when
     the three cortex-forming subsets are equal-N resampled.
-
-    WHY?
-    ----
-    The pooled subset is class-imbalanced (Factin SHELL ~734, Branched
-    CONTINUOUS ~381, Linear CONTINUOUS ~674). A pooled PCA could in
-    principle be steered by the largest group. This bootstrap repeatedly
-    subsamples each group down to min(N) and refits the PCA, giving a
-    distribution over loadings and explained variances.
-
-    If the loadings are tight across bootstraps (small std), the result
-    is robust to class imbalance. If they are wide, the headline
-    interpretation needs hedging.
-
-    Parameters
-    ----------
-    subset     : DataFrame from build_cortex_forming_subset().
-    output_dir : where to save the CSV.
-    n_boots    : number of bootstrap iterations.
-    seed       : random seed for reproducibility.
-
-    Returns
-    -------
-    sensitivity_df : long-format DataFrame with one row per
-                     (iteration, component, metric) loading.
     """
     print(f"  -> Bootstrap sensitivity check ({n_boots} iterations, "
           f"equal-N resampling)...")
 
     rng = np.random.default_rng(seed)
 
-    # Per-condition row indices in the subset.
     indices_per_condition = {}
     for cat in CORTEX_FORMING_FILTER.keys():
         indices_per_condition[cat] = subset.index[subset['Category'] == cat].to_numpy()
 
-    # The smallest group sets the resample size.
     n_min = min(len(v) for v in indices_per_condition.values())
     print(f"      -> Resampling N = {n_min} per condition each iteration")
 
-    boot_loadings  = []   # list of (3 PCs, 3 metrics) arrays
-    boot_variances = []   # list of length-3 arrays
+    boot_loadings  = []
+    boot_variances = []
 
     for b in range(n_boots):
-
-        # Stratified resample: take n_min indices from each condition,
-        # without replacement.
         chosen = []
         for cat, idx_array in indices_per_condition.items():
             chosen.append(rng.choice(idx_array, size=n_min, replace=False))
@@ -515,17 +454,14 @@ def run_bootstrap_sensitivity(subset, output_dir,
 
         X = subset.loc[chosen_idx, PCA_METRICS].values
 
-        # Z-score on this bootstrap's pooled sample.
         scaler = StandardScaler()
         X_z = scaler.fit_transform(X)
 
-        # Fit PCA.
         pca = PCA(n_components=3)
         pca.fit(X_z)
         loadings  = pca.components_.copy()
         var_ratio = pca.explained_variance_ratio_.copy()
 
-        # Apply the same sign convention as the main fit.
         idx_aloc    = PCA_METRICS.index('A localization')
         idx_tcortex = PCA_METRICS.index('t_cortex')
         if loadings[0, idx_aloc] < 0:
@@ -536,10 +472,9 @@ def run_bootstrap_sensitivity(subset, output_dir,
         boot_loadings.append(loadings)
         boot_variances.append(var_ratio)
 
-    boot_loadings  = np.stack(boot_loadings)     # (n_boots, 3 PCs, 3 metrics)
-    boot_variances = np.stack(boot_variances)    # (n_boots, 3 PCs)
+    boot_loadings  = np.stack(boot_loadings)
+    boot_variances = np.stack(boot_variances)
 
-    # ---- Summarise loadings -------------------------------------------
     rows = []
     for pc_idx, pc in enumerate(['PC1', 'PC2', 'PC3']):
         for m_idx, metric in enumerate(PCA_METRICS):
@@ -554,7 +489,6 @@ def run_bootstrap_sensitivity(subset, output_dir,
                 'Pct97_5':         round(float(np.percentile(values, 97.5)), 4),
             })
 
-    # ---- Summarise explained variance ---------------------------------
     for pc_idx, pc in enumerate(['PC1', 'PC2', 'PC3']):
         values = boot_variances[:, pc_idx]
         rows.append({
@@ -573,7 +507,6 @@ def run_bootstrap_sensitivity(subset, output_dir,
     sensitivity_df.to_csv(path, index=False)
     print(f"      -> Saved: {path}")
 
-    # Console summary.
     print("\n      === Bootstrap loadings (mean ± std over resamples) ===")
     print(sensitivity_df.to_string(index=False))
     print()
@@ -582,25 +515,25 @@ def run_bootstrap_sensitivity(subset, output_dir,
 
 
 # =============================================================================
-# STEP 5 -- PLOTS  (inline; can be moved to plotting.py later if desired)
+# STEP 5 -- PLOTS  (Updated with custom font sizes and PDF output)
 # =============================================================================
 
 def _plot_loadings(loadings, output_dir):
     """
     Bar chart: loading of each metric on each PC.
-    Reads like "PCi is built from metric x with weight L_{ij}."
     """
-    fig, ax = plt.subplots(figsize=(4.0, 3.0))
-    # Read the actual canvas width back from the figure rather than
-    # hardcoding it a second time — stays correct even if the figsize
-    # above is ever changed.
-    fig_width = fig.get_size_inches()[0]
+    fig, ax = plt.subplots(figsize=(4.0, 3.0))  # Dimensions unchanged
+
+    # --- ADJUST FONT SIZES HERE EASILY ---
+    FS_LABEL  = 15
+    FS_TICK   = 12
+    FS_LEGEND = 10
 
     metric_labels = [METRIC_LABELS[m] for m in PCA_METRICS]
     x = np.arange(len(metric_labels))
     width = 0.27
 
-    palette_pc = ['#233040', '#6B7B8C', '#AAB8C2']    # PC1, PC2, PC3
+    palette_pc = ["#868684", "#1065AB", "#B31529"]    # PC1, PC2, PC3
 
     for i, pc in enumerate(['PC1', 'PC2', 'PC3']):
         ax.bar(x + (i - 1) * width, loadings[i, :], width,
@@ -609,25 +542,17 @@ def _plot_loadings(loadings, output_dir):
 
     ax.axhline(0, color='black', linewidth=0.6)
     ax.set_xticks(x)
-    # PLOT_STYLE['fontsize_tick'] doesn't exist anymore -- the key was
-    # renamed to 'fontsize_tick_pt' when plotting.py centralized styling,
-    # and at the same time the *meaning* changed: it's now a printed-point
-    # TARGET that needs to go through _fs_for_width() to become an actual
-    # matplotlib fontsize for this figure's specific canvas width (this
-    # plot is much narrower than the pipeline's other figures, so it needs
-    # its own scaling rather than reusing the single-column default).
-    ax.set_xticklabels(metric_labels, rotation=0,
-                       fontsize=plotting._fs_for_width('tick', fig_width))
-    ax.set_ylabel('Loading on z-scored metric',
-                  fontsize=plotting._fs_for_width('label', fig_width))
+    ax.set_xticklabels(metric_labels, rotation=0, fontsize=FS_TICK, fontweight="bold")
+    ax.set_yticklabels(ax.get_yticks(), fontsize=FS_TICK, fontweight="bold")
+    
+    ax.set_ylabel('Loading on z-scored metric', fontsize=FS_LABEL, fontweight="bold")
     ax.set_ylim(-1.0, 1.0)
-    ax.legend(loc='lower right', frameon=False,
-              fontsize=plotting._fs_for_width('legend', fig_width))
+    ax.legend(loc='lower right', frameon=False, fontsize=FS_LEGEND)
 
     sns.despine(ax=ax)
     fig.tight_layout()
 
-    path = os.path.join(output_dir, "Plot_PCA_Loadings.png")
+    path = os.path.join(output_dir, "Plot_PCA_Loadings.pdf")  # Saved as PDF
     fig.savefig(path, dpi=plotting.PLOT_STYLE['dpi_raster'], bbox_inches='tight')
     plt.close(fig)
     print(f"      -> Saved: {path}")
@@ -637,8 +562,12 @@ def _plot_scree(var_ratio, output_dir):
     """
     Scree plot: explained variance per PC, with cumulative line.
     """
-    fig, ax = plt.subplots(figsize=(3.2, 2.6))
-    fig_width = fig.get_size_inches()[0]
+    fig, ax = plt.subplots(figsize=(3.2, 2.6))  # Dimensions unchanged
+
+    # --- ADJUST FONT SIZES HERE EASILY ---
+    FS_LABEL = 15
+    FS_TICK  = 12
+    FS_ANNOT = 10
 
     pcs = ['PC1', 'PC2', 'PC3']
     pct = var_ratio * 100
@@ -650,22 +579,23 @@ def _plot_scree(var_ratio, output_dir):
     ax2.plot(pcs, cum, color='#B33A3A', marker='o', linewidth=1.0,
              markersize=4, label='Cumulative')
     ax2.set_ylim(0, 105)
-    ax2.set_ylabel('Cumulative (%)',
-                   fontsize=plotting._fs_for_width('label', fig_width))
+    ax2.set_ylabel('Cumulative (%)', fontsize=FS_LABEL, fontweight="bold")
+    
+    plt.setp(ax.get_xticklabels(), fontsize=FS_TICK, fontweight="bold")
+    plt.setp(ax.get_yticklabels(), fontsize=FS_TICK, fontweight="bold")
+    plt.setp(ax2.get_yticklabels(), fontsize=FS_TICK, fontweight="bold")
 
     # Numerical labels on each bar.
     for i, v in enumerate(pct):
-        ax.text(i, v + 1.5, f"{v:.1f}%", ha='center',
-                fontsize=plotting._fs_for_width('annot', fig_width))
+        ax.text(i, v + 1.5, f"{v:.1f}%", ha='center', fontsize=FS_ANNOT, fontweight="bold")
 
     ax.set_ylim(0, 105)
-    ax.set_ylabel('Explained variance (%)',
-                  fontsize=plotting._fs_for_width('label', fig_width))
+    ax.set_ylabel('Explained variance (%)', fontsize=FS_LABEL, fontweight="bold")
 
     sns.despine(ax=ax, right=False)
     fig.tight_layout()
 
-    path = os.path.join(output_dir, "Plot_PCA_Scree.png")
+    path = os.path.join(output_dir, "Plot_PCA_Scree.pdf")  # Saved as PDF
     fig.savefig(path, dpi=plotting.PLOT_STYLE['dpi_raster'], bbox_inches='tight')
     plt.close(fig)
     print(f"      -> Saved: {path}")
@@ -674,16 +604,10 @@ def _plot_scree(var_ratio, output_dir):
 def _plot_scatter(scores_df, output_dir):
     """
     PC1 vs PC2 scatter with marginal KDEs, coloured by condition.
-
-    sns.jointplot is used because it produces the marginal-density axes
-    automatically. The colour mapping uses plotting.CONDITION_PALETTE
-    so this figure visually matches the rest of the chapter.
     """
-    # Build a clean DataFrame for the joint plot.
     plot_df = scores_df[['Category', 'PC1', 'PC2']].copy()
     plot_df['ConditionLabel'] = plot_df['Category'].map(plotting.CONDITION_LABELS)
 
-    # Custom palette keyed on the human-readable label.
     palette = {
         plotting.CONDITION_LABELS[c]: plotting.CONDITION_PALETTE[c]
         for c in CORTEX_FORMING_FILTER.keys()
@@ -691,10 +615,15 @@ def _plot_scatter(scores_df, output_dir):
     hue_order = [plotting.CONDITION_LABELS[c]
                  for c in ['Factin', 'BranchedCortex', 'LinearCortex']]
 
+    # --- ADJUST FONT SIZES HERE EASILY ---
+    FS_LABEL  = 15
+    FS_TICK   = 15
+    FS_LEGEND = 15
+
     g = sns.jointplot(
         data=plot_df, x='PC1', y='PC2', hue='ConditionLabel',
         hue_order=hue_order, palette=palette,
-        kind='scatter', height=4.2, ratio=4, space=0.05,
+        kind='scatter', height=4.2, ratio=4, space=0.05,  # Dimensions unchanged
         marginal_kws=dict(fill=True, alpha=0.45, linewidth=0.8, common_norm=False),
         joint_kws=dict(s=8, alpha=0.5, edgecolor='none'),
     )
@@ -702,17 +631,27 @@ def _plot_scatter(scores_df, output_dir):
     g.ax_joint.axhline(0, color='black', linewidth=0.4, linestyle='--', alpha=0.5)
     g.ax_joint.axvline(0, color='black', linewidth=0.4, linestyle='--', alpha=0.5)
 
-    fig_width = g.fig.get_size_inches()[0]
-    g.ax_joint.set_xlabel('PC1  (cortex maturity)',
-                          fontsize=plotting._fs_for_width('label', fig_width))
-    g.ax_joint.set_ylabel('PC2  (architectural identity)',
-                          fontsize=plotting._fs_for_width('label', fig_width))
-    g.ax_joint.legend(loc='upper right', frameon=False,
-                      fontsize=plotting._fs_for_width('legend', fig_width))
+    g.ax_joint.set_xlabel('PC1  (cortex maturity)', fontsize=FS_LABEL, fontweight="bold")
+    g.ax_joint.set_ylabel('PC2  (architectural identity)', fontsize=FS_LABEL, fontweight="bold")
+    
+    g.ax_joint.tick_params(axis='both', labelsize=FS_TICK)
+    plt.setp(g.ax_joint.get_xticklabels(), fontweight="bold")
+    plt.setp(g.ax_joint.get_yticklabels(), fontweight="bold")
+
+    # --- LEGEND MOVED TO UPPER LEFT ---
+    legend = g.ax_joint.legend(loc='lower left', frameon=False, fontsize=FS_LEGEND)
+    
+    # Robustly resize legend markers
+    if legend:
+        for handle in legend.legend_handles:
+            if hasattr(handle, 'set_sizes'):
+                handle.set_sizes([150])          # For collection handles
+            elif hasattr(handle, 'set_markersize'):
+                handle.set_markersize(12)        # For Line2D handles
 
     sns.despine(ax=g.ax_joint)
 
-    path = os.path.join(output_dir, "Plot_PCA_Scatter.png")
+    path = os.path.join(output_dir, "Plot_PCA_Scatter.pdf")  # Saved as PDF
     g.fig.savefig(path, dpi=plotting.PLOT_STYLE['dpi_raster'], bbox_inches='tight')
     plt.close(g.fig)
     print(f"      -> Saved: {path}")
@@ -725,23 +664,6 @@ def _plot_scatter(scores_df, output_dir):
 def run_pca_analysis(df, output_dir):
     """
     Runs the full PCA pipeline.
-    Call this from master_pipeline.py, or use standalone mode below.
-
-    Steps
-    -----
-    1.  Create PCA_Analysis sub-folder
-    2.  Build the cortex-forming subset
-    3.  Fit PCA on pooled z-scored metrics, save loadings + variance + scores
-    4.  Run pairwise statistical tests on PC scores (PC1, PC2, PC3)
-    5.  Bootstrap sensitivity check (equal-N resampling)
-    6.  Plot loadings, scree, and PC1-PC2 scatter
-
-    Parameters
-    ----------
-    df         : master DataFrame after analysis_phenotype has run.
-                 Must contain 'Category', 'Phenotype_Category',
-                 and the three PCA metrics.
-    output_dir : Batch_Analysis_Results folder path
     """
     print("\n--- Running Principal Component Analysis ---")
 
@@ -750,7 +672,6 @@ def run_pca_analysis(df, output_dir):
 
     plotting.set_paper_style()
 
-    # ---- Minimum column check -----------------------------------------
     required = {'Category', 'Phenotype_Category'} | set(PCA_METRICS)
     missing = required - set(df.columns)
     if missing:
@@ -758,23 +679,16 @@ def run_pca_analysis(df, output_dir):
         print("  ! Run analysis_phenotype before analysis_pca.")
         return
 
-    # ---- 1. Build the cortex-forming subset ---------------------------
     subset = build_cortex_forming_subset(df)
     if len(subset) < 100:
         print(f"  ! Cortex-forming subset has only {len(subset)} vesicles.")
         print("  ! PCA aborted (too few observations for a stable fit).")
         return
 
-    # ---- 2. Fit the PCA -----------------------------------------------
     scores_df, loadings, var_ratio = fit_pca(subset, pca_dir)
-
-    # ---- 3. Statistical tests on PC scores ----------------------------
     run_pca_statistical_tests(scores_df, pca_dir)
-
-    # ---- 4. Bootstrap sensitivity check -------------------------------
     run_bootstrap_sensitivity(subset, pca_dir)
 
-    # ---- 5. Plots ------------------------------------------------------
     print("  -> Generating PCA plots...")
     _plot_loadings(loadings, pca_dir)
     _plot_scree(var_ratio, pca_dir)
@@ -788,12 +702,6 @@ def run_pca_analysis(df, output_dir):
 # =============================================================================
 
 if __name__ == "__main__":
-    """
-    Runs when you execute:  python analysis_pca.py
-
-    Does NOT run when master_pipeline.py does:  import analysis_pca
-    (because then __name__ is 'analysis_pca', not '__main__')
-    """
     print("Running analysis_pca.py in standalone mode...")
 
     if not os.path.exists(STANDALONE_CSV_PATH):

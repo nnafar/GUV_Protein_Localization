@@ -180,7 +180,6 @@ def save_excluded_fractions(df_full, output_dir):
     print(excluded_df.to_string(index=False))
     print()
 
-
 def run_size_analysis(df, output_dir):
     """
     Generates the size distribution plot and saves size statistics.
@@ -199,11 +198,9 @@ def run_size_analysis(df, output_dir):
     """
     print("\n--- Running Size Distribution Analysis ---")
 
-    # ---- Guard against missing flag (back-compat with older CSVs) ------
     if 'Shape_Quality_Flag' not in df.columns:
         print("  ! 'Shape_Quality_Flag' column not found -- "
               "treating all vesicles as analysable.")
-        print("  ! Re-run file_handling on the raw data to add the flag.")
         df_full = df.copy()
         df_full['Shape_Quality_Flag'] = True
     else:
@@ -216,14 +213,17 @@ def run_size_analysis(df, output_dir):
     df_analysable = df_full[df_full['Shape_Quality_Flag'] == True].copy()
 
     # ---- 3. Combined violin + scatter + box plot ----------------------
-    plotting.plot_violin_scatter_box(
+    batch_col = 'Batch_Label' if 'Batch_Label' in df_analysable.columns else ('Batch_ID' if 'Batch_ID' in df_analysable.columns else None)
+    
+    plotting.plot_superplot(
         data=df_analysable,
         x_col='Category',
         y_col='Refined Radius (um)',
-        title='GUV Size Distribution by Condition',
+        batch_col=batch_col,
+        title='GUV Size Distribution by Condition (SuperPlot)',
         ylabel='GUV radius (µm)',
         output_dir=output_dir,
-        filename='Size_Distribution_Violin_Scatter_Box.png',
+        filename='Size_Distribution_Superplot.png',
     )
 
     # ---- 4. Save descriptive statistics on the analysable subset ------

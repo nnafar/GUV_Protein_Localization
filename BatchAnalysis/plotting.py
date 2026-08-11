@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as pe
+import matplotlib.ticker as ticker
 from matplotlib.lines import Line2D
 import seaborn as sns
 from scipy.stats import mannwhitneyu
@@ -59,13 +60,13 @@ METRIC_LABELS = {
 # }
 
 PHENOTYPE_PALETTE = {
-    "Excluded":       "#DCDDE6", 
-    "Empty":          "#c1c1d4",     
-    "Lumenal":        "#7C88B6",   
-    "Sparse":         "#5d6ea6",   
-    "Shell":          "#5d6ea6",   
-    "Patchy":         "#34487a",   
-    "Continuous":     "#1a243d",   
+    "Excluded":       "#DBD9D4", 
+    "Empty":          "#8EC4DE",     
+    "Lumenal":        "#3A93C3",   
+    "Shell":          "#1065AB",   
+    "Sparse":         "#F6A482",   
+    "Patchy":         "#D75F4C",   
+    "Continuous":     "#B31529",   
 }
 
 # CONDITION_PALETTE = {
@@ -76,10 +77,10 @@ PHENOTYPE_PALETTE = {
 # }
 
 CONDITION_PALETTE = {
-    "Empty":          "#9896bb",   
-    "Factin":         "#5d6ea6",   
-    "BranchedCortex": "#34487a",   
-    "LinearCortex":   "#1a243d",   
+    "Empty":          "#DBD9D4",   
+    "Factin":         "#868684",   
+    "BranchedCortex": "#1065AB",   
+    "LinearCortex":   "#B31529",   
 }
 
 # Used by plot_representative_radial_profiles(): when several conditions are
@@ -406,6 +407,125 @@ def plot_violin_scatter_box(data, x_col, y_col, title, ylabel, output_dir, filen
     stem = os.path.splitext(filename)[0]  # Strip extension so _save_fig adds .pdf
     _save_fig(fig, output_dir, stem)
 
+
+
+def plot_superplot(data, x_col, y_col, batch_col, title, ylabel, output_dir, filename):
+    """
+    Generates a SuperPlot displaying individual vesicle data points in the background
+    colored by condition class with distinct marker shapes per experiment/batch,
+    overlaid with batch means, grand mean ± SEM, and category median (eta) annotations.
+    """
+    # List of distinct markers to cycle through for experiments/batches
+    EXPERIMENT_MARKERS = ['o', 's', '^', '*', 'p', 'D', 'v', '<', '>', 'h']
+    set_paper_style()
+    order = [c for c in CONDITION_ORDER if c in data[x_col].unique()]
+    
+    # 1. Slightly widen figure dimensions to give columns more breathing room
+    fig_width, fig_height = _get_figsize_single_col()
+    fig, ax = plt.subplots(figsize=(fig_width * 1.15, fig_height))
+
+    category_labels = []
+
+    for x_idx, category in enumerate(order):
+        cat_df = data[data[x_col] == category].dropna(subset=[y_col])
+        base_label = CONDITION_LABELS.get(category, category)
+        category_labels.append(base_label)
+
+        if cat_df.empty:
+            continue
+
+        # Calculate overall category median for annotation
+        cat_median = cat_df[y_col].median()
+        
+        # 2. Add median text directly under each column with a smaller font size
+        ax.text(
+            x_idx, -0.08, 
+            f"$\\eta = {cat_median:.2f}~\\mu\\mathrm{{m}}$", 
+            transform=ax.get_xaxis_transform(),
+            ha='center', 
+            va='top', 
+            fontsize=_fs("tick") * 0.82
+        )
+
+        # Get defined color for this condition class
+        class_color = CONDITION_PALETTE.get(category, '#333333')
+
+        batches = cat_df[batch_col].unique() if (batch_col and batch_col in cat_df.columns) else [None]
+        batch_means = []
+
+        for b_idx, batch in enumerate(batches):
+            marker = EXPERIMENT_MARKERS[b_idx % len(EXPERIMENT_MARKERS)]
+
+            if batch is not None:
+                b_df = cat_df[cat_df[batch_col] == batch]
+            else:
+                b_df = cat_df
+
+            y_vals = b_df[y_col].values
+            if len(y_vals) == 0:
+                continue
+
+            # Scatter individual vesicle points with jitter
+            jitter = np.random.normal(0, 0.05, size=len(y_vals))
+            ax.scatter(
+                np.full_like(y_vals, x_idx) + jitter,
+                y_vals,
+                color=class_color,
+                marker=marker,
+                alpha=0.3,
+                s=16,
+                edgecolor='none',
+                zorder=2
+            )
+
+            # Compute per-batch replicate mean
+            b_mean = np.mean(y_vals)
+            batch_means.append(b_mean)
+            
+            # Plot large batch mean marker
+            ax.scatter(
+                x_idx,
+                b_mean,
+                color=class_color,
+                marker=marker,
+                s=90,
+                edgecolor='black',
+                linewidth=1.2,
+                zorder=4
+            )
+
+        # Overall Condition Grand Mean ± SEM error bar line
+        if batch_means:
+            grand_mean = np.mean(batch_means)
+            sem = np.std(batch_means, ddof=1) / np.sqrt(len(batch_means)) if len(batch_means) > 1 else 0
+            
+            ax.errorbar(
+                x_idx,
+                grand_mean,
+                yerr=sem,
+                fmt='_',
+                color='black',
+                markersize=22,
+                mew=2.5,
+                capsize=6,
+                capthick=2,
+                zorder=5
+            )
+
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(category_labels, fontsize=_fs("tick"))
+    ax.set_ylabel(ylabel, fontsize=_fs("label"))
+    ax.set_ylim(bottom=0)
+    
+    # 3. Increase padding on x-axis limits to widen spacing
+    ax.set_xlim(-0.7, len(order) - 0.3)
+    
+    sns.despine(ax=ax)
+
+    plt.tight_layout()
+    stem = os.path.splitext(filename)[0]
+    _save_fig(fig, output_dir, stem)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. PHENOTYPE COMPOSITION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,47 +540,66 @@ def plot_phenotype_composition(df, x_col, phenotype_col, output_dir, filename, _
     pheno_present = [p for p in pheno_order if p in pct.columns]
     pct = pct[pheno_present]
 
-    # Extra height vs. the standard single-column figure: the legend now
-    # sits below the plot (not to the right), so it needs its own vertical
-    # space rather than sharing the plot's height. The multiplier here and
-    # the legend's bbox_to_anchor offset below are tuned together — if you
-    # change one, check the other, since a mismatch between them is what
-    # left a large empty gap between the bars and the legend previously.
-    fig_w, fig_h = _get_figsize_single_col()
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h * 1.12))
+    # Your chosen font sizes
+    FS_LABEL = 26
+    FS_TICK = 22
+    FS_ANNOT = 25
+    FS_LEGEND = 24
+
+    fig = plt.figure(figsize=(6.0, 10.0))
+    # Your chosen axes layout
+    ax = fig.add_axes([0.18, 0.12, 1.1, 0.7])
+
     bottom = np.zeros(len(order))
     
     for pheno in pheno_present:
         vals = pct[pheno].values
         ax.bar(
-            range(len(order)), vals, bottom=bottom, width=0.7,
+            range(len(order)), vals, bottom=bottom, width=0.80,
             color=PHENOTYPE_PALETTE.get(pheno, "#aaaaaa"),
-            edgecolor="#333333", linewidth=0.8, label=pheno
+            edgecolor="#333333", linewidth=1.8, label=pheno
         )
         for j, (v, b) in enumerate(zip(vals, bottom)):
             if v > 5:
                 ax.text(j, b + v / 2, f"{v:.0f}%",
                         ha="center", va="center",
-                        fontsize=_fs("annot") - 1, color="white", fontweight="bold",
-                        path_effects=[pe.Stroke(linewidth=0.5, foreground='black'), pe.Normal()])
+                        fontsize=FS_ANNOT, color="white", fontweight="bold",
+                        path_effects=[pe.Stroke(linewidth=1.5, foreground='black'), pe.Normal()])
         bottom += vals
 
     ax.set_xticks(range(len(order)))
-    ax.set_xticklabels([CONDITION_LABELS[c] for c in order], fontsize=_fs("label"))
-    ax.set_ylabel("Percentage of GUVs (%)", fontsize=_fs("label"))
+    ax.set_xticklabels([CONDITION_LABELS[c] for c in order], fontsize=FS_TICK, fontweight="bold")
+    ax.set_xlim(-0.5, len(order) - 0.5)
+    
+    ax.set_ylabel("Percentage of GUVs (%)", fontsize=FS_LABEL, fontweight="bold")
+    ax.tick_params(axis='y', labelsize=FS_TICK, width=1.8, length=8)
+    ax.tick_params(axis='x', pad=8)
     ax.set_ylim(0, 108)
 
-    handles = [mpatches.Patch(facecolor=PHENOTYPE_PALETTE.get(p, "#aaa"), edgecolor="#333333", linewidth=0.8, label=p) for p in pheno_present]
-    # Legend moved below the plot (instead of to the right) so the plot itself
-    # gets the full figure width. With up to 7 phenotypes, spreading them
-    # across 4 columns keeps the legend block compact and readable rather
-    # than a single very wide row.
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.10),
-              ncol=min(4, len(pheno_present)), fontsize=_fs("legend"), frameon=False, title="Phenotype")
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.8)
 
-    plt.tight_layout()
+    handles = [mpatches.Patch(facecolor=PHENOTYPE_PALETTE.get(p, "#aaa"), edgecolor="#333333", linewidth=1.2, label=p) for p in pheno_present]
+    
+    legend = ax.legend(
+        handles=handles, 
+        loc="upper center", 
+        # Tightened vertical offset for height=0.8 axes
+        bbox_to_anchor=(0.5, -0.09),
+        ncol=min(4, len(pheno_present)), 
+        fontsize=FS_LEGEND, 
+        frameon=False, 
+        title="Phenotype",
+        columnspacing=0.5,   
+        handletextpad=0.3,   
+        handlelength=0.8     
+    )
+    if legend is not None:
+        legend.get_title().set_fontsize(FS_LEGEND)
+        legend.get_title().set_weight("bold")
+
     if _as_figure:
-        return fig  # Return to figure_assembly.py without saving
+        return fig
     stem = os.path.splitext(filename)[0]
     _save_fig(fig, output_dir, stem)
 
@@ -470,9 +609,9 @@ def plot_phenotype_composition(df, x_col, phenotype_col, output_dir, filename, _
 
 def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
     from scipy.stats import spearmanr
+    from matplotlib.patches import Patch
     set_paper_style()
 
-    # RADIUS INJECTED AS A PARAMETER HERE
     metrics = ["Refined Radius (um)", "t_cortex", "A localization", "Gini_Index"]
     cols_present = [c for c in metrics if c in cond_df.columns]
     plot_df = cond_df[cols_present + ["Phenotype_Category"]].dropna(subset=cols_present)
@@ -481,58 +620,22 @@ def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
     if plot_df.empty:
         return
 
-    phenotypes = plot_df["Phenotype_Category"].unique().tolist()
-    # NOTE: "Lumenal" must be included here. It was previously missing, which
-    # silently dropped every Lumenal vesicle's colour mapping to fully
-    # transparent (alpha=0) -- the points were still drawn (and still
-    # counted in the correlation r-values, which read straight from
-    # plot_df), but invisible in the legend and the scatter/KDE panels.
-    # Lumenal is the largest single phenotype group in every condition here,
-    # so this mattered a lot. Keep this list in sync with the one used for
-    # the phenotype-stacked-bar plot elsewhere in this file.
+    # Master list of all possible phenotypes to ensure uniform legend width across all conditions
     pheno_order_all = ["Shell", "Sparse", "Patchy", "Continuous", "Excluded", "Lumenal"]
+    phenotypes = plot_df["Phenotype_Category"].unique().tolist()
     phenotypes_sorted = [p for p in pheno_order_all if p in phenotypes]
     palette = {p: PHENOTYPE_PALETTE.get(p, "#aaaaaa") for p in phenotypes_sorted}
 
-    # Reuse the shared METRIC_LABELS dict so this plot's axis labels stay in
-    # sync with every other figure if a label is ever renamed.
     plot_df = plot_df.rename(columns=METRIC_LABELS)
     cols_display = [METRIC_LABELS.get(c, c) for c in cols_present]
 
-    # The PairGrid lays out one panel per variable along both axes, so its
-    # total width grows with how many metrics are present. We need that
-    # actual width (not the single-column default) to scale fonts correctly.
-    PAIRPLOT_PANEL_HEIGHT_IN = 3.0
-    PAIRPLOT_ASPECT = 1.0
-    grid_width_in = len(cols_display) * PAIRPLOT_PANEL_HEIGHT_IN * PAIRPLOT_ASPECT
-
-    # ── Local font boost for this figure only ───────────────────────────────
-    # _fs_for_width() targets PLOT_STYLE's nominal *_pt sizes assuming the
-    # figure is embedded at the full page text width. In the thesis this
-    # figure is placed as three stacked panels at ~0.49\linewidth each, i.e.
-    # roughly HALF the width _fs_for_width() assumes -- so without
-    # compensation, everything below prints at roughly half the nominal
-    # point size. PAIRPLOT_FONT_BOOST corrects for that and adds a bit more
-    # on top, since this is a dense multi-panel figure where labels/ticks/
-    # annotations need to stay legible at print size. Applied uniformly so
-    # every text element in this figure scales together; tune this single
-    # number (and PAIRPLOT_PANEL_HEIGHT_IN above, which gives the bigger
-    # text room to breathe) rather than touching individual fontsize=...
-    # calls below.
-    PAIRPLOT_FONT_BOOST = 1.75
-    # Axis labels ("GUV Radius (µm)", "t$_{cortex}$ (µm)", ...) are the
-    # longest strings in this figure and get rotated 90° on the y-axis --
-    # at the full boost above, the longer ones (Radius, t_cortex) render
-    # taller than one grid row and bleed into the row above/below. Give
-    # labels their own, smaller multiplier instead of fighting this with
-    # extra row height (which would shrink everything else's final print
-    # size -- see _fs_pp docstring below).
-    PAIRPLOT_LABEL_BOOST = 1.15
-
-    def _fs_pp(role):
-        """_fs_for_width(role, grid_width_in), boosted for this figure."""
-        boost = PAIRPLOT_LABEL_BOOST if role == "label" else PAIRPLOT_FONT_BOOST
-        return _fs_for_width(role, grid_width_in) * boost
+    # --- Typography Scale ---
+    FS_TITLE    = 25
+    FS_LABEL    = 25
+    FS_TICK     = 25
+    FS_ANNOT    = 25
+    FS_CBAR_NUM = 25
+    FS_LEGEND   = 25    
 
     def _corr_upper_closure(x, y, **kwargs):
         ax = plt.gca()
@@ -543,19 +646,16 @@ def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
         ax.set_xticks([])
         ax.set_yticks([])
 
-        col_x = x.name
-        col_y = y.name
-        full_x = plot_df[col_x]
-        full_y = plot_df[col_y]
+        col_x, col_y = x.name, y.name
+        full_x, full_y = plot_df[col_x], plot_df[col_y]
 
         mask = ~(np.isnan(full_x.values) | np.isnan(full_y.values))
-        valid_x = full_x.values[mask]
-        valid_y = full_y.values[mask]
+        valid_x, valid_y = full_x.values[mask], full_y.values[mask]
 
         if len(valid_x) < 5 or np.std(valid_x) == 0 or np.std(valid_y) == 0:
             ax.set_facecolor("#e5e5e5")
             ax.text(0.5, 0.5, "n.d.", transform=ax.transAxes, ha="center", va="center",
-                    fontsize=_fs_pp("annot"), color="#999999")
+                    fontsize=FS_ANNOT, color="#999999")
             return
 
         r, p = spearmanr(valid_x, valid_y)
@@ -565,8 +665,9 @@ def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
         luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
         text_color = "white" if luminance < 0.55 else "#222222"
         stars = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
+        
         ax.text(0.5, 0.5, f"r={r:.2f}\n{stars}", transform=ax.transAxes, ha="center", va="center",
-                fontsize=_fs_pp("annot"), fontweight="bold", color=text_color)
+                fontsize=FS_ANNOT, fontweight="bold", color=text_color)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=UserWarning)
@@ -574,23 +675,30 @@ def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
         g = sns.PairGrid(
             plot_df, vars=cols_display, hue="Phenotype_Category",
             palette=palette, hue_order=phenotypes_sorted,
-            diag_sharey=False, height=PAIRPLOT_PANEL_HEIGHT_IN, aspect=PAIRPLOT_ASPECT
+            diag_sharey=False
         )
         
-        g.map_diag(sns.kdeplot, fill=True, alpha=0.50, linewidth=1.2)
-        g.map_lower(sns.scatterplot, s=12, alpha=0.45, edgecolor="none", linewidth=0)
+        g.map_diag(sns.kdeplot, fill=True, alpha=0.45, linewidth=1.2, common_norm=False, warn_singular=False)
+        g.map_lower(sns.scatterplot, s=16, alpha=0.50, edgecolor="none", linewidth=0)
         g.map_upper(_corr_upper_closure)
+
+    # Increased figure width and height to comfortably accommodate font size 25 across 6 legend columns
+    g.figure.set_size_inches(14.0, 13.5)
+    
+    # Adjusted margins to provide vertical and horizontal breathing room for large text
+    g.figure.subplots_adjust(
+        left   = 0.1300,  
+        right  = 0.9500,  
+        top    = 0.9000,  
+        bottom = 0.2800,  
+        wspace = 0.10, 
+        hspace = 0.10
+    )
 
     n_vars = len(cols_display)
     main_axes_ids = {id(a) for a in g.axes.flat}
     for ax in g.figure.axes:
         if id(ax) not in main_axes_ids:
-            # diag_sharey=False gives each diagonal KDE its own twin y-axis
-            # for independent scaling. It isn't part of g.axes, so the loop
-            # above never sees it -- but seaborn still auto-labels it
-            # ("Density") at the same position as the real row label,
-            # rendering on top of it. This figure isn't meant to convey
-            # absolute density values, so just silence these entirely.
             ax.set_ylabel("")
             ax.set_xlabel("")
             ax.set_yticks([])
@@ -601,87 +709,82 @@ def plot_pairplot(cond_df, output_dir, filename_suffix="", _as_figure=False):
             for spine in ax.spines.values():
                 spine.set_visible(False)
 
-    # ── Explicitly size tick numbers and axis labels ────────────────────────
-    # These previously fell back to global rcParam defaults sized for the
-    # single-column width (xtick/ytick.labelsize) or seaborn's "paper"
-    # context default (axis labels have no rcParam override at all) -- both
-    # too small once PAIRPLOT_FONT_BOOST is meant to apply uniformly. Set
-    # them explicitly here so every text element in this figure is on the
-    # same scale.
-    #
-    # Rotated y-axis labels eat vertical space proportional to their string
-    # length -- "GUV Radius (µm)" is long enough that, rotated, it bled into
-    # the row above/below at any boost worth applying. Shorten only the
-    # rotated (y-axis) copy; the unrotated x-axis copy at the bottom of the
-    # grid has plenty of horizontal room and keeps the full text.
     Y_LABEL_OVERRIDE = {"GUV Radius (µm)": "Radius (µm)"}
 
     for ax in g.axes.flat:
-        ax.tick_params(axis="both", labelsize=_fs_pp("tick"))
+        ax.tick_params(axis="both", width=1.1, length=4)
+        
+        plt.setp(ax.get_xticklabels(), fontsize=FS_TICK, fontweight="bold")
+        plt.setp(ax.get_yticklabels(), fontsize=FS_TICK, fontweight="bold")
+        
         if ax.xaxis.label.get_text():
-            ax.xaxis.label.set_fontsize(_fs_pp("label"))
-            ax.xaxis.labelpad = 8
+            ax.xaxis.label.set_fontsize(FS_LABEL)
+            ax.xaxis.label.set_weight("bold")
+            ax.xaxis.labelpad = 5
+            
         if ax.yaxis.label.get_text():
             short = Y_LABEL_OVERRIDE.get(ax.yaxis.label.get_text())
-            if short:
-                ax.set_ylabel(short)
-            ax.yaxis.label.set_fontsize(_fs_pp("label"))
-            ax.yaxis.labelpad = 10
+            label_text = short if short else ax.yaxis.label.get_text()
+            ax.set_ylabel(label_text, rotation=90)
+            ax.yaxis.label.set_fontsize(FS_LABEL)
+            ax.yaxis.label.set_weight("bold")
+            ax.yaxis.labelpad = 12
 
-    # Legend as a single horizontal row, centered, directly below the
-    # colorbar -- matches the phenotype-legend style used elsewhere in this
-    # file (e.g. plot_batch_phenotype_composition) rather than the
-    # vertical-list style used when the legend sat to the right.
-    #
-    # IMPORTANT: add_legend() must be called BEFORE subplots_adjust() below.
-    # It runs its own internal layout pass to reserve room for the legend
-    # (in its default expected position), which silently overrides any
-    # margins set before it -- confirmed by inspecting the actual axes
-    # bboxes afterwards (they did not match the margins passed in here).
-    # Calling subplots_adjust() afterwards makes our margins win instead.
-    g.add_legend(
-        title          = "Phenotype",
-        fontsize       = _fs_pp("legend"),
-        bbox_to_anchor = (0.5, -0.04),
-        loc            = "upper center",
-        ncol           = len(phenotypes_sorted),
-        markerscale    = 2.5,
-        handletextpad  = 0.3,
-        columnspacing  = 1.2,
-        borderaxespad  = 0.0,
-    )
-    # title_fontsize= is silently ignored by add_legend() in this seaborn
-    # version (verified: legend entries took the boosted size, the title
-    # stayed at the unboosted rcParam default) -- set it explicitly instead,
-    # same as the legend-title pattern used elsewhere in this file.
-    if g.legend is not None:
-        g.legend.get_title().set_fontsize(_fs_pp("title"))
+    g.axes[-1, 0].set_xticks([])
+    g.axes[-1, 0].set_yticks([])
+    
+    g.figure.canvas.draw()
 
-    # Deterministic margins instead of tight_layout(): tight_layout() pads
-    # the axes block inward by an amount that depends on the rendered text,
-    # which made the gap between the grid and the legend unpredictable (and
-    # large) once fonts were bigger. Fixed margins mean the right edge of
-    # the grid is always at GRID_RIGHT. Bottom margin stacks THREE things:
-    # x-tick-labels+x-axis-label text (top part of this margin), then the
-    # colorbar, then the legend below it.
-    GRID_LEFT, GRID_RIGHT, GRID_TOP, GRID_BOTTOM = 0.135, 0.97, 0.895, 0.27
-    g.figure.subplots_adjust(left=GRID_LEFT, right=GRID_RIGHT, top=GRID_TOP, bottom=GRID_BOTTOM)
+    ax_x0 = g.axes[-1, 0].get_position().x0
+    ax_x1 = g.axes[-1, -1].get_position().x1
+    ax_width = ax_x1 - ax_x0
+
     norm = plt.Normalize(vmin=-1, vmax=1)
     sm = plt.cm.ScalarMappable(cmap="RdBu_r", norm=norm)
     sm.set_array([])
-    cax = g.figure.add_axes([GRID_LEFT + 0.04, 0.105, (GRID_RIGHT - GRID_LEFT) - 0.08, 0.022])
+    
+    # Position colorbar safely in the bottom margin space
+    cax = g.figure.add_axes([ax_x0, 0.200, ax_width, 0.020])
     cbar = g.figure.colorbar(sm, cax=cax, orientation="horizontal")
-    cbar.set_label("Spearman ρ", fontsize=_fs_pp("annot"))
-    cbar.ax.tick_params(labelsize=_fs_pp("annot") - 2)
+    cbar.set_label("Spearman ρ", fontsize=FS_LABEL, fontweight="bold", labelpad=6)
+    plt.setp(cbar.ax.get_xticklabels(), fontsize=FS_CBAR_NUM, fontweight="bold")
+    cbar.ax.tick_params(width=1.1, length=4)
+
+    # Force a uniform static legend using the complete master list
+    legend_handles = [
+        Patch(facecolor=PHENOTYPE_PALETTE.get(p, "#aaaaaa"), label=p)
+        for p in pheno_order_all
+    ]
+    
+    # Position the 6-column legend further down below the colorbar
+    g.figure.legend(
+        handles        = legend_handles,
+        title          = "Phenotype",
+        fontsize       = FS_LEGEND,
+        bbox_to_anchor = (ax_x0 + ax_width / 2, 0.035),
+        loc            = "lower center",
+        ncol           = len(pheno_order_all),
+        markerscale    = 1.5,
+        handletextpad  = 0.4,
+        columnspacing  = 1.0,
+        handlelength   = 1.2,
+        borderaxespad  = 0.0,
+    )
+    if g.figure.legends:
+        g.figure.legends[0].get_title().set_fontsize(FS_LEGEND)
+        g.figure.legends[0].get_title().set_weight("bold")
 
     condition_label = filename_suffix.lstrip("_")
-    g.figure.suptitle(f"Correlation Matrix & Pair Plot — {CONDITION_LABELS.get(condition_label, condition_label)}",
-                       y=1.02, fontsize=_fs_pp("title"))
+    g.figure.suptitle(
+        f"Correlation Matrix & Pair Plot — {CONDITION_LABELS.get(condition_label, condition_label)}",
+        y=0.945, fontsize=FS_TITLE, fontweight="bold"
+    )
 
     stem = f"Correlation_Matrix_PairPlot{filename_suffix}"
     if _as_figure:
-        return g.figure  # Return to figure_assembly.py without saving
-    g.figure.savefig(os.path.join(output_dir, stem + ".pdf"), bbox_inches="tight", dpi=PLOT_STYLE["dpi_raster"])
+        return g.figure
+    
+    g.figure.savefig(os.path.join(output_dir, stem + ".pdf"), dpi=PLOT_STYLE["dpi_raster"], bbox_inches="tight")
     plt.close(g.figure)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1123,6 +1226,13 @@ def plot_batch_size_distribution(df, output_dir, _as_figure=False):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_batch_phenotype_composition(df, output_dir, _as_figure=False):
+    # --- ADJUST FONT SIZES HERE EASILY ---
+    FS_TITLE  = 25
+    FS_LABEL  = 25
+    FS_TICK   = 25
+    FS_ANNOT  = 25
+    FS_LEGEND = 25
+
     set_paper_style()
     if 'Phenotype_Category' not in df.columns: return
 
@@ -1131,11 +1241,9 @@ def plot_batch_phenotype_composition(df, output_dir, _as_figure=False):
 
     pheno_order_all = ["Empty", "Lumenal", "Shell", "Sparse", "Patchy", "Continuous", "Excluded"]
     ncols = min(2, len(conditions))
-    nrows = int(np.ceil(len(conditions) / ncols))
-    # Widened from 5.0/4.5in to match plot_batch_size_distribution's sizing,
-    # giving N-labels and stacked-bar percentage labels enough room when a
-    # condition pools batches from multiple dates.
-    panel_w_in, panel_h_in = 5.8, 5.2
+    nrows = int(np.ceil((len(conditions) + 1) / ncols))  # +1 to make room for the legend slot if needed
+    
+    panel_w_in, panel_h_in = 5.5, 4.8
     fig_width = ncols * panel_w_in
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, nrows * panel_h_in), squeeze=False)
@@ -1166,34 +1274,49 @@ def plot_batch_phenotype_composition(df, output_dir, _as_figure=False):
                 if val > 6:
                     ax.text(x_pos, bot + val / 2, f'{val:.0f}%',
                             ha='center', va='center',
-                            fontsize=_fs_for_width("annot", fig_width) - 1, color='white', fontweight='bold',
+                            fontsize=FS_ANNOT - 2, color='white', fontweight='bold',
                             path_effects=[pe.Stroke(linewidth=0.5, foreground='black'), pe.Normal()])
             bottom += vals
 
         for x_pos, batch in enumerate(batch_order):
             n_ves = len(cond_df[cond_df['Batch_Label'] == batch])
             ax.text(x_pos, 104, f'N={n_ves}', ha='center', va='bottom',
-                    rotation=90, fontsize=_fs_for_width("annot", fig_width), color='#555555')
+                    rotation=90, fontsize=FS_ANNOT, color='#555555', fontweight='bold')
 
-        ax.set_title(CONDITION_LABELS.get(condition, condition), fontsize=_fs_for_width("title", fig_width), fontweight='bold', pad=20)
-        ax.set_ylabel('GUVs (%)', fontsize=_fs_for_width("label", fig_width))
-        # The axis extends to 145 so the rotated N-label and title both have
-        # room to breathe, but this is a 0-100% chart — showing tick marks
-        # above 100 would be misleading, so the visible ticks are capped
-        # explicitly regardless of the extended axis range.
+        ax.set_title(CONDITION_LABELS.get(condition, condition), fontsize=FS_TITLE, fontweight='bold', pad=20)
+        ax.set_ylabel('GUVs (%)', fontsize=FS_LABEL, fontweight='bold')
+        
         ax.set_ylim(0, 145)
         ax.set_yticks([0, 20, 40, 60, 80, 100])
+        ax.tick_params(axis='y', labelsize=FS_TICK)
+        for label in ax.get_yticklabels():
+            label.set_fontsize(FS_TICK)
+            label.set_fontweight('bold')
+
         ax.set_xticks(range(len(batch_order)))
-        ax.set_xticklabels(batch_order, fontsize=_fs_for_width("tick", fig_width), rotation=30, ha='right')
+        ax.set_xticklabels(batch_order, fontsize=FS_TICK, rotation=30, ha='right', fontweight='bold')
+        sns.despine(ax=ax)
 
-    all_phenos_shown = [p for p in pheno_order_all if p in df['Phenotype_Category'].unique() and p != 'Empty']
-    legend_patches = [mpatches.Patch(facecolor=PHENOTYPE_PALETTE.get(p, '#aaa'), edgecolor='#333333', linewidth=0.8, label=p) for p in all_phenos_shown]
-    legend = fig.legend(handles=legend_patches, loc='lower center', ncol=len(legend_patches), fontsize=_fs_for_width("legend", fig_width), frameon=False, bbox_to_anchor=(0.5, -0.05), title='Phenotype')
-    # fig.legend's title defaults to a different (often smaller) fontsize
-    # than the entries themselves — set it explicitly to match.
-    legend.get_title().set_fontsize(_fs_for_width("legend", fig_width))
+    # --- PLACE LEGEND IN THE 4TH (UNUSED) GRID SLOT ---
+    legend_ax_idx = len(conditions)
+    if legend_ax_idx < len(ax_flat):
+        legend_ax = ax_flat[legend_ax_idx]
+        legend_ax.axis('off')  # Hide borders and ticks for the legend panel
+        
+        all_phenos_shown = [p for p in pheno_order_all if p in df['Phenotype_Category'].unique() and p != 'Empty']
+        legend_patches = [mpatches.Patch(facecolor=PHENOTYPE_PALETTE.get(p, '#aaa'), edgecolor='#333333', linewidth=0.8, label=p) for p in all_phenos_shown]
+        
+        leg = legend_ax.legend(
+            handles=legend_patches, loc='center', fontsize=FS_LEGEND, 
+            frameon=True, facecolor='white', edgecolor='none', title='Phenotype'
+        )
+        leg.get_title().set_fontsize(FS_LEGEND)
+        leg.get_title().set_fontweight('bold')
 
-    for idx in range(len(conditions), len(ax_flat)): ax_flat[idx].set_visible(False)
+    # Hide any remaining surplus axes beyond the legend slot
+    for idx in range(legend_ax_idx + 1, len(ax_flat)):
+        ax_flat[idx].set_visible(False)
+
     plt.tight_layout()
     if _as_figure:
         return fig
@@ -2053,7 +2176,6 @@ def plot_lumen_retention_cortex_only(df, output_dir, _as_figure=False):
         return fig
     _save_fig(fig, output_dir, "Plot_LumenRetention_CortexOnly")
 
-
 def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
     """
     Batch-level violin plots for actin metrics, restricted to cortex-forming
@@ -2077,6 +2199,13 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
     contributed (after filtering) — so you can spot batches with very few
     surviving GUVs.
     """
+    # --- ADJUST FONT SIZES HERE EASILY ---
+    FS_TITLE  = 30
+    FS_LABEL  = 30
+    FS_TICK   = 30
+    FS_ANNOT  = 30
+    FS_FOOTER = 22
+
     n_before   = len(df)
     plot_df    = _filter_cortex_forming(df)
     n_excluded = n_before - len(plot_df)
@@ -2134,18 +2263,24 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
 
             if row_idx == 0:
                 ax.set_title(CONDITION_LABELS.get(condition, condition),
-                             fontsize=_fs_for_width("title", fig_width), fontweight='bold', pad=14)
+                             fontsize=FS_TITLE, fontweight='bold', pad=14)
             if col_idx == 0:
-                ax.set_ylabel(metric_labels.get(metric, metric), fontsize=_fs_for_width("label", fig_width))
+                ax.set_ylabel(metric_labels.get(metric, metric), fontsize=FS_LABEL, fontweight='bold')
 
             # X-labels only on the bottom row
             if row_idx == len(metrics) - 1:
                 ax.set_xticks(range(len(batch_order)))
-                ax.set_xticklabels(batch_order, fontsize=_fs_for_width("tick", fig_width),
-                                   rotation=30, ha='right')
+                ax.set_xticklabels(batch_order, fontsize=FS_TICK,
+                                   rotation=30, ha='right', fontweight='bold')
             else:
                 ax.set_xticks(range(len(batch_order)))
                 ax.tick_params(labelbottom=False)
+
+            # --- EXPLICITLY STYLE Y-TICKS WITH FS_TICK ---
+            ax.tick_params(axis='y', labelsize=FS_TICK)
+            for label in ax.get_yticklabels():
+                label.set_fontsize(FS_TICK)
+                label.set_fontweight('bold')
 
             # N label above each violin: cortex-forming count per batch.
             # Anchored to the TRUE max, not the 99th percentile -- see
@@ -2157,7 +2292,7 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
                 n_ves = sub[sub['Batch_Label'] == batch][metric].count()
                 ax.text(x_pos, y_top + y_range * 0.08,
                         f'N={n_ves}', ha='center', va='bottom', rotation=90,
-                        fontsize=_fs_for_width("annot", fig_width), color='#555555')
+                        fontsize=FS_ANNOT, color='#555555', fontweight='bold')
             if row_idx == 0:
                 # Only the top row sits directly under a title, so only it
                 # needs extra headroom to keep the rotated N-label clear.
@@ -2166,18 +2301,20 @@ def plot_batch_actin_metrics_cortex_only(df, output_dir, _as_figure=False):
 
             sns.despine(ax=ax)
 
-    plt.tight_layout()
+    # --- RESERVED BOTTOM MARGIN FOR LARGE LABELS & FOOTER ---
+    fig.subplots_adjust(bottom=0.18, left=0.12)
+    plt.tight_layout(rect=[0, 0.06, 1, 1])
+
     fig.text(
-        0.5, -0.01,
+        0.5, 0.01,
         f"Cortex-forming GUVs only  ·  Empty + Lumenal excluded  "
         f"({n_excluded:,} GUVs removed total)",
-        ha='center', va='top', fontsize=_fs_for_width("annot", fig_width) * 0.78, color='#666666', style='italic',
+        ha='center', va='bottom', fontsize=FS_FOOTER, color='#666666', style='italic',
     )
 
     if _as_figure:
         return fig
     _save_fig(fig, output_dir, "Batch_Actin_Metrics_CortexOnly")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 14. REPRESENTATIVE RADIAL PROFILE COMPARISON
@@ -2207,11 +2344,123 @@ def _find_alignment_x(values, radii, phenotype):
     peak_idx = values.argmax()
     return radii[peak_idx]
 
+# def plot_representative_radial_profiles(rep_df, output_dir, figsize=None, _as_figure=False):
+#     """
+#     Draws the representative radial actin-intensity profile for Lumenal,
+#     Sparse, and Continuous GUVs, with BranchedCortex and LinearCortex
+#     overlaid in ONE shared panel.
+#     """
+#     set_paper_style()
+
+#     conditions = [c for c in CONDITION_ORDER if c in rep_df['Condition'].unique()]
+#     if not conditions:
+#         return
+
+#     if figsize is None:
+#         figsize = (2.2, 4.4)
+#     fig_width, fig_height = figsize
+#     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+#     VIOLIN_PLOT_LATEX_WIDTH_FRACTION    = 0.54
+#     RADIAL_PROFILE_LATEX_WIDTH_FRACTION = 0.22
+#     RADIAL_PROFILE_FONT_BOOST = VIOLIN_PLOT_LATEX_WIDTH_FRACTION / RADIAL_PROFILE_LATEX_WIDTH_FRACTION
+#     LABEL_EXTRA_BOOST  = 1.15
+#     RADIAL_PROFILE_LEGEND_BOOST = 2.1
+
+#     def _fs_rp_label(role):
+#         return _fs_for_width(role, fig_width) * RADIAL_PROFILE_FONT_BOOST * LABEL_EXTRA_BOOST
+
+#     def _fs_rp_legend(role):
+#         return _fs_for_width(role, fig_width) * RADIAL_PROFILE_LEGEND_BOOST
+
+#     fs_label  = _fs_rp_label("label")
+#     fs_tick   = _fs_rp_label("tick")
+#     fs_legend = _fs_rp_legend("legend")
+
+#     ax.axvline(0.0, color='#999999', linestyle=':', linewidth=1.0, zorder=1)
+
+#     phenotype_handles = {}
+#     all_aligned_min = []
+#     all_aligned_max = []
+
+#     for condition in conditions:
+#         cond_df    = rep_df[rep_df['Condition'] == condition]
+#         linestyle  = CONDITION_LINESTYLE.get(condition, '-')
+
+#         for phenotype in _REPRESENTATIVE_PHENOTYPE_ORDER:
+#             curve = cond_df[cond_df['Phenotype'] == phenotype].sort_values('Normalized_Radius')
+#             if curve.empty:
+#                 continue
+
+#             values = curve['Median_Actin_Normalized'].to_numpy()
+#             radii  = curve['Normalized_Radius'].to_numpy()
+
+#             alignment_x = _find_alignment_x(values, radii, phenotype)
+#             aligned_x   = curve['Normalized_Radius'] - alignment_x
+
+#             color = PHENOTYPE_PALETTE.get(phenotype, '#aaaaaa')
+
+#             line, = ax.plot(
+#                 aligned_x, curve['Median_Actin_Normalized'],
+#                 color=color, linestyle=linestyle, linewidth=1.6, zorder=3)
+
+#             all_aligned_min.append(aligned_x.min())
+#             all_aligned_max.append(aligned_x.max())
+
+#             if phenotype not in phenotype_handles:
+#                 phenotype_handles[phenotype] = line
+
+#     ax.set_xlabel("(r − r$_{peak}$) / R", fontsize=fs_label)
+#     ax.set_ylabel("Actin intensity (normalized to max)", fontsize=fs_label)
+#     ax.tick_params(labelsize=fs_tick)
+
+#     # Force left boundary negative to clear legend
+#     # Cap right boundary to the shortest common curve end to align trace terminations
+#     common_x_max = min(all_aligned_max)
+#     ax.set_xlim(-1.6, common_x_max)
+    
+#     ax.set_ylim(0, 1.15)
+
+#     ordered_phenotypes = [p for p in _REPRESENTATIVE_PHENOTYPE_ORDER if p in phenotype_handles]
+
+#     branched_handles = [
+#         Line2D([0], [0], color=phenotype_handles[p].get_color(),
+#                linestyle=CONDITION_LINESTYLE.get('BranchedCortex', '-'), linewidth=1.6)
+#         for p in ordered_phenotypes
+#     ]
+#     linear_handles = [
+#         Line2D([0], [0], color=phenotype_handles[p].get_color(),
+#                linestyle=CONDITION_LINESTYLE.get('LinearCortex', '--'), linewidth=1.6)
+#         for p in ordered_phenotypes
+#     ]
+
+#     leg1 = ax.legend(
+#         branched_handles, ordered_phenotypes, title="Branched",
+#         loc='upper left', bbox_to_anchor=(0.0, 1.0), fontsize=fs_legend,
+#         title_fontsize=fs_legend, frameon=False, handlelength=1.6,
+#         borderaxespad=0.2, labelspacing=0.3)
+#     ax.add_artist(leg1)
+
+#     # Shifted Linear legend upward to close the gap
+#     ax.legend(
+#         linear_handles, ordered_phenotypes, title="Linear",
+#         loc='upper left', bbox_to_anchor=(0.0, 0.72), fontsize=fs_legend,
+#         title_fontsize=fs_legend, frameon=False, handlelength=1.6,
+#         borderaxespad=0.2, labelspacing=0.3)
+
+#     sns.despine(ax=ax)
+
+#     plt.tight_layout()
+
+#     if _as_figure:
+#         return fig
+#     _save_fig(fig, output_dir, "Plot_Representative_Radial_Profiles")
+
 def plot_representative_radial_profiles(rep_df, output_dir, figsize=None, _as_figure=False):
     """
-    Draws the representative radial actin-intensity profile for Lumenal,
-    Sparse, and Continuous GUVs, with BranchedCortex and LinearCortex
-    overlaid in ONE shared panel.
+    Draws representative radial actin-intensity profiles normalized to max (0 to 1)
+    and aligned at peak position (x = 0) in two side-by-side panels (Branched vs Linear),
+    with a horizontal legend below the subplots.
     """
     set_paper_style()
 
@@ -2219,106 +2468,142 @@ def plot_representative_radial_profiles(rep_df, output_dir, figsize=None, _as_fi
     if not conditions:
         return
 
+    # 1. Taller figure height without increasing width (Width: 6.0, Height: 4.8)
     if figsize is None:
-        figsize = (2.2, 4.4)
+        figsize = (6.0, 4.8)
     fig_width, fig_height = figsize
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    
+    fig, (ax_branched, ax_linear) = plt.subplots(1, 2, figsize=(fig_width, fig_height), sharey=True)
 
-    VIOLIN_PLOT_LATEX_WIDTH_FRACTION    = 0.54
-    RADIAL_PROFILE_LATEX_WIDTH_FRACTION = 0.22
-    RADIAL_PROFILE_FONT_BOOST = VIOLIN_PLOT_LATEX_WIDTH_FRACTION / RADIAL_PROFILE_LATEX_WIDTH_FRACTION
-    LABEL_EXTRA_BOOST  = 1.15
-    RADIAL_PROFILE_LEGEND_BOOST = 2.1
+    fs_label  = _fs("label")
+    fs_tick   = _fs("tick")
+    fs_legend = _fs("legend")
+    fs_title  = _fs("title")
 
-    def _fs_rp_label(role):
-        return _fs_for_width(role, fig_width) * RADIAL_PROFILE_FONT_BOOST * LABEL_EXTRA_BOOST
-
-    def _fs_rp_legend(role):
-        return _fs_for_width(role, fig_width) * RADIAL_PROFILE_LEGEND_BOOST
-
-    fs_label  = _fs_rp_label("label")
-    fs_tick   = _fs_rp_label("tick")
-    fs_legend = _fs_rp_legend("legend")
-
-    ax.axvline(0.0, color='#999999', linestyle=':', linewidth=1.0, zorder=1)
+    # Map conditions to subplots
+    cond_ax_map = {}
+    for c in conditions:
+        if 'branched' in c.lower():
+            cond_ax_map[c] = (ax_branched, "Branched")
+        elif 'linear' in c.lower():
+            cond_ax_map[c] = (ax_linear, "Linear")
+        else:
+            cond_ax_map[c] = (ax_branched, c)
 
     phenotype_handles = {}
-    all_aligned_min = []
-    all_aligned_max = []
+
+    for ax in (ax_branched, ax_linear):
+        ax.axvline(0.0, color='#b0b0b0', linestyle=':', linewidth=1.0, zorder=1)
 
     for condition in conditions:
-        cond_df    = rep_df[rep_df['Condition'] == condition]
-        linestyle  = CONDITION_LINESTYLE.get(condition, '-')
+        if condition not in cond_ax_map:
+            continue
+
+        ax, title_str = cond_ax_map[condition]
+        ax.set_title(title_str, fontsize=fs_title, pad=8, fontweight='bold')
+
+        cond_df = rep_df[rep_df['Condition'] == condition]
+
+        # First pass: calculate aligned x-values for all phenotypes in this condition
+        curves_data = {}
+        non_lumenal_starts = []
 
         for phenotype in _REPRESENTATIVE_PHENOTYPE_ORDER:
             curve = cond_df[cond_df['Phenotype'] == phenotype].sort_values('Normalized_Radius')
             if curve.empty:
                 continue
 
-            values = curve['Median_Actin_Normalized'].to_numpy()
-            radii  = curve['Normalized_Radius'].to_numpy()
+            raw_values = curve['Median_Actin_Normalized'].to_numpy()
+            radii      = curve['Normalized_Radius'].to_numpy()
+
+            # 0-to-1 Normalization Per Curve
+            val_min = np.nanmin(raw_values)
+            val_max = np.nanmax(raw_values)
+            if val_max > val_min:
+                values = (raw_values - val_min) / (val_max - val_min)
+            else:
+                values = raw_values
 
             alignment_x = _find_alignment_x(values, radii, phenotype)
-            aligned_x   = curve['Normalized_Radius'] - alignment_x
+            aligned_x   = radii - alignment_x
+
+            curves_data[phenotype] = {
+                'aligned_x': aligned_x,
+                'values': values
+            }
+
+            if phenotype != 'Lumenal':
+                non_lumenal_starts.append(np.min(aligned_x))
+
+        # Determine target starting x for Lumenal alignment
+        target_start_x = np.median(non_lumenal_starts) if non_lumenal_starts else -0.6
+
+        # Plot processed curves
+        all_aligned_min = []
+        all_aligned_max = []
+
+        for phenotype in _REPRESENTATIVE_PHENOTYPE_ORDER:
+            if phenotype not in curves_data:
+                continue
+
+            aligned_x = curves_data[phenotype]['aligned_x']
+            values    = curves_data[phenotype]['values']
+
+            # 2. Shift Lumenal curve rightward so it starts where the others do
+            if phenotype == 'Lumenal' and len(aligned_x) > 0:
+                current_start = np.min(aligned_x)
+                shift_offset = target_start_x - current_start
+                aligned_x = aligned_x + shift_offset
 
             color = PHENOTYPE_PALETTE.get(phenotype, '#aaaaaa')
 
             line, = ax.plot(
-                aligned_x, curve['Median_Actin_Normalized'],
-                color=color, linestyle=linestyle, linewidth=1.6, zorder=3)
+                aligned_x, values,
+                color=color, linestyle='-', linewidth=1.8, zorder=3)
 
-            all_aligned_min.append(aligned_x.min())
-            all_aligned_max.append(aligned_x.max())
+            all_aligned_min.append(np.min(aligned_x))
+            all_aligned_max.append(np.max(aligned_x))
 
             if phenotype not in phenotype_handles:
                 phenotype_handles[phenotype] = line
 
-    ax.set_xlabel("(r − r$_{peak}$) / R", fontsize=fs_label)
-    ax.set_ylabel("Actin intensity (normalized to max)", fontsize=fs_label)
-    ax.tick_params(labelsize=fs_tick)
+        if all_aligned_min and all_aligned_max:
+            ax.set_xlim(min(all_aligned_min) - 0.08, max(all_aligned_max) + 0.08)
 
-    # Force left boundary negative to clear legend
-    # Cap right boundary to the shortest common curve end to align trace terminations
-    common_x_max = min(all_aligned_max)
-    ax.set_xlim(-1.6, common_x_max)
-    
-    ax.set_ylim(0, 1.15)
+    # Common layout and formatting
+    for ax in (ax_branched, ax_linear):
+        ax.set_xlabel("(r − r$_{peak}$) / R", fontsize=fs_label)
+        ax.tick_params(labelsize=fs_tick)
+        ax.set_ylim(-0.02, 1.10)
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=4))
+        sns.despine(ax=ax)
 
+    ax_branched.set_ylabel("Actin intensity (normalized to max)", fontsize=fs_label)
+
+    # 3. Side-by-side Legend placed horizontally below both plots
     ordered_phenotypes = [p for p in _REPRESENTATIVE_PHENOTYPE_ORDER if p in phenotype_handles]
-
-    branched_handles = [
-        Line2D([0], [0], color=phenotype_handles[p].get_color(),
-               linestyle=CONDITION_LINESTYLE.get('BranchedCortex', '-'), linewidth=1.6)
-        for p in ordered_phenotypes
-    ]
-    linear_handles = [
-        Line2D([0], [0], color=phenotype_handles[p].get_color(),
-               linestyle=CONDITION_LINESTYLE.get('LinearCortex', '--'), linewidth=1.6)
+    legend_handles = [
+        Line2D([0], [0], color=PHENOTYPE_PALETTE.get(p, '#aaaaaa'), linestyle='-', linewidth=1.8)
         for p in ordered_phenotypes
     ]
 
-    leg1 = ax.legend(
-        branched_handles, ordered_phenotypes, title="Branched",
-        loc='upper left', bbox_to_anchor=(0.0, 1.0), fontsize=fs_legend,
-        title_fontsize=fs_legend, frameon=False, handlelength=1.6,
-        borderaxespad=0.2, labelspacing=0.3)
-    ax.add_artist(leg1)
+    fig.legend(
+        legend_handles, ordered_phenotypes,
+        loc='lower center',
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=len(ordered_phenotypes),
+        fontsize=fs_legend,
+        frameon=False,
+        columnspacing=2.0,
+        handlelength=1.5
+    )
 
-    # Shifted Linear legend upward to close the gap
-    ax.legend(
-        linear_handles, ordered_phenotypes, title="Linear",
-        loc='upper left', bbox_to_anchor=(0.0, 0.72), fontsize=fs_legend,
-        title_fontsize=fs_legend, frameon=False, handlelength=1.6,
-        borderaxespad=0.2, labelspacing=0.3)
-
-    sns.despine(ax=ax)
-
-    plt.tight_layout()
+    # Leave bottom margin for external legend
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
 
     if _as_figure:
         return fig
     _save_fig(fig, output_dir, "Plot_Representative_Radial_Profiles")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. REPRESENTATIVE CHANNEL IMAGE GRID
